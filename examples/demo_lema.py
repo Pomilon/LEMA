@@ -1,83 +1,55 @@
 import torch
-import torch.optim as optim
-import sys
 import os
+from lema import LemaConfig, LemaModel, MemoryStrategy
+from lema.utils.model_utils import break_shared_weights
+from transformers import GPT2Config, GPT2LMHeadModel
+from safetensors.torch import save_file
 
-# Add src to path if not installed
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+def run_demo():
+    print("--- LEMA Unified API Demo ---")
 
-from lema.core.gbi import GlobalBinaryIndex
-from lema.core.lora import LoRAManager
-from lema.models.gpt2 import GPT2Adapter
-from lema.engine.trainer import LemaTrainer
-from lema.config import LemaConfig, MemoryStrategy
+    model_dir = "./demo_model"
+    gbi_path = os.path.join(model_dir, "model.safetensors")
+    
+    # 1. Configuration
+    config = LemaConfig(
+        model_name_or_path=model_dir, 
+        model_type="gpt2",
+        gbi_path=gbi_path, 
+        device="cpu",
+        strategy=MemoryStrategy.STREAMING,
+        lora_rank=8,
+        lora_target_modules=["c_attn"],
+        output_dir="./lema_checkpoints",
+        save_steps=10
+    )
 
-# 1. Configuration matching generate_dummy_gpt2.py
-hf_config = {
-    "vocab_size": 1000,
-    "n_positions": 128,
-    "n_embd": 64,
-    "n_layer": 4,
-    "n_head": 4,
-    "layer_norm_epsilon": 1e-5,
-    "attn_implementation": "eager"
-}
+    # 2. Initialize Model & Trainer
+    model = LemaModel(config)
+    model.initialize_lora()
+    
+    optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=1e-4)
+    trainer = model.get_trainer(optimizer)
 
-model_path = "dummy_gpt2.safetensors"
-device = "cuda" if torch.cuda.is_available() else "cpu"
+    # 3. Execution
+    print("Executing training step...")
+    input_ids = torch.randint(0, 1000, (1, 16))
+    logits, loss = trainer.train_step(input_ids, labels=input_ids)
+    
+    print(f"Step complete. Loss: {loss:.4f}")
+    trainer.save_checkpoint("./lema_checkpoints/final_demo")
 
-print(f"Using device: {device}")
-
-# 2. LEMA Configuration
-lema_config = LemaConfig(
-    model_name_or_path=model_path,
-    device=device,
-    strategy=MemoryStrategy.STREAMING,
-    lora_rank=4,
-    learning_rate=0.01
-)
-
-# 3. Components
-print("Initializing Adapter...")
-adapter = GPT2Adapter(hf_config)
-
-print("Initializing GBI...")
-if not os.path.exists(model_path):
-    print(f"Error: {model_path} not found. Run examples/generate_dummy_gpt2.py first.")
-    sys.exit(1)
-gbi = GlobalBinaryIndex(model_path)
-
-print("Initializing LoRA Manager...")
-lora_config = {"r": lema_config.lora_rank, "alpha": 8, "target_modules": ["c_attn"]}
-lora_manager = LoRAManager(lora_config, device=device)
-
-# 4. Initialize LoRA parameters by pre-scanning
-print("Pre-scanning layers to initialize LoRA parameters...")
-for layer in adapter.get_layer_metadata():
-    if layer['type'] == 'block':
-        module = adapter.construct_layer_module(layer['id'], None, lora_manager)
-        adapter.release_layer_module(module)
-
-# 5. Setup Optimizer
-trainable_params = lora_manager.get_trainable_parameters()
-print(f"Found {len(trainable_params)} LoRA parameters.")
-optimizer = optim.AdamW(trainable_params, lr=lema_config.learning_rate)
-
-# 6. Initialize Trainer
-print("Initializing Trainer...")
-trainer = LemaTrainer(
-    config=lema_config,
-    model_adapter=adapter,
-    gbi=gbi,
-    lora_manager=lora_manager,
-    optimizer=optimizer
-)
-
-# 7. Training Step
-input_ids = torch.randint(0, 1000, (1, 10)).to(device)
-
-print("Executing Training Step...")
-logits, loss = trainer.train_step(input_ids, labels=input_ids)
-
-print(f"Success! Training step completed. Loss: {loss:.4f}")
-print("Final Output Logits Shape:", logits.shape)
+if __name__ == "__main__":
+    model_dir = "./demo_model"
+    if not os.path.exists(os.path.join(model_dir, "model.safetensors")):
+        print("Generating dummy model...")
+        os.makedirs(model_dir, exist_ok=True)
+        dummy_config = GPT2Config(n_layer=2, n_embd=128, n_head=4, vocab_size=1000)
+        dummy_model = GPT2LMHeadModel(dummy_config)
+        dummy_model = break_shared_weights(dummy_model)
+        
+        state_dict = {k: v.clone().detach() for k, v in dummy_model.state_dict().items()}
+        save_file(state_dict, os.path.join(model_dir, "model.safetensors"))
+        dummy_config.save_pretrained(model_dir)
+    
+    run_demo()

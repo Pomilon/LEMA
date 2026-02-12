@@ -1,0 +1,24 @@
+{
+    "model_name_or_path": "./demo_model",
+    "model_type": "gpt2",
+    "gbi_path": "./demo_model/model.safetensors",
+    "device": "cpu",
+    "strategy": "streaming",
+    "ram_buffer_size": 2,
+    "vram_buffer_size": 1,
+    "use_lora": true,
+    "lora_rank": 8,
+    "lora_alpha": 32,
+    "lora_target_modules": [
+        "c_attn"
+    ],
+    "learning_rate": 0.0001,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "max_seq_length": 512,
+    "gradient_checkpointing": false,
+    "save_steps": 10,
+    "output_dir": "./lema_checkpoints",
+    "dtype": "float16",
+    "attn_implementation": "eager"
+}

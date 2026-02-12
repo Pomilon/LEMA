@@ -2,84 +2,66 @@ import torch
 import torch.optim as optim
 from transformers import GPT2Config, GPT2LMHeadModel
 from safetensors.torch import save_file
-from src.lema.core.gbi import GlobalBinaryIndex
-from src.lema.models.gpt2 import GPT2Adapter
-from src.lema.engine.trainer import LemaTrainer
-from src.lema.core.lora import LoRAManager
-from src.lema.config import LemaConfig, MemoryStrategy
+from lema import LemaConfig, LemaModel, MemoryStrategy
+from lema.utils.model_utils import break_shared_weights
 import os
 import pytest
 
 def test_lora_training_loop(tmp_path):
-    # 1. Setup
-    config = GPT2Config(
-        vocab_size=100,
-        n_positions=32,
-        n_embd=32,
-        n_layer=2,
-        n_head=2,
+    # 1. Setup Model Directory
+    model_dir = tmp_path / "gpt2_model"
+    model_dir.mkdir()
+    model_path = model_dir / "model.safetensors"
+    
+    config_hf = GPT2Config(
+        vocab_size=100, n_positions=32, n_embd=32, n_layer=2, n_head=2,
         attn_implementation="eager"
     )
+    model_hf = GPT2LMHeadModel(config_hf)
+    model_hf = break_shared_weights(model_hf)
     
-    # Save dummy weights
-    model = GPT2LMHeadModel(config)
-    state_dict = model.state_dict()
-    new_state_dict = {k: v.clone() for k, v in state_dict.items()}
-    model_path = tmp_path / "test_train.safetensors"
-    save_file(new_state_dict, str(model_path))
+    state_dict = {k: v.clone().detach() for k, v in model_hf.state_dict().items()}
+    save_file(state_dict, str(model_path))
+    config_hf.save_pretrained(str(model_dir))
     
-    # 2. Components
+    # 2. Unified LEMA API
     lema_config = LemaConfig(
-        model_name_or_path=str(model_path),
+        model_name_or_path=str(model_dir),
+        model_type="gpt2",
+        gbi_path=str(model_path),
         device="cpu",
         strategy=MemoryStrategy.STREAMING,
-        learning_rate=0.1
+        learning_rate=0.1,
+        lora_rank=2,
+        lora_target_modules=["c_attn"],
+        save_steps=2,
+        output_dir=str(tmp_path / "checkpoints")
     )
     
-    adapter = GPT2Adapter(config.to_dict())
-    gbi = GlobalBinaryIndex(str(model_path))
+    model = LemaModel(lema_config)
+    model.initialize_lora()
     
-    lora_config = {"r": 2, "alpha": 4, "target_modules": ["c_attn"]}
-    lora_manager = LoRAManager(lora_config, device="cpu")
+    optimizer = optim.SGD(model.get_trainable_parameters(), lr=lema_config.learning_rate)
+    trainer = model.get_trainer(optimizer)
     
-    # Trigger param creation
-    for layer in adapter.get_layer_metadata():
-        if layer['type'] == 'block':
-            module = adapter.construct_layer_module(layer['id'], None, lora_manager)
-            adapter.release_layer_module(module)
-
-    params = lora_manager.get_trainable_parameters()
-    optimizer = optim.SGD(params, lr=lema_config.learning_rate)
-    
-    trainer = LemaTrainer(
-        config=lema_config,
-        model_adapter=adapter,
-        gbi=gbi,
-        lora_manager=lora_manager,
-        optimizer=optimizer
-    )
-    
-    # Capture initial param values
-    initial_params = [p.clone().detach() for p in params]
-    
-    # 3. Train Loop
+    # 3. Training
     input_ids = torch.randint(0, 100, (1, 10))
-    losses = []
+    initial_params = [p.clone().detach() for p in model.get_trainable_parameters()]
+    
     for _ in range(3):
-        # We need to provide labels to get a real loss if we want, 
-        # or it will use dummy .mean()
-        _, loss = trainer.train_step(input_ids)
-        losses.append(loss if loss is not None else 0.0)
+        trainer.train_step(input_ids, labels=input_ids)
         
-    # 4. Verify Updates
+    # 4. Verification
     params_changed = False
-    for p_init, p_curr in zip(initial_params, params):
+    for p_init, p_curr in zip(initial_params, model.get_trainable_parameters()):
         if not torch.allclose(p_init, p_curr):
             params_changed = True
             break
             
-    assert params_changed, "LoRA parameters did not change after training!"
-    print(f"Losses: {losses}")
+    assert params_changed, "LoRA parameters did not change!"
+    assert (tmp_path / "checkpoints" / "checkpoint-2").exists()
 
 if __name__ == "__main__":
-    test_lora_training_loop(os.path.abspath("."))
+    import sys
+    # Local run support
+    pytest.main([__file__])

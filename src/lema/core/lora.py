@@ -175,3 +175,42 @@ class LoRAManager:
             all_params.append(p_dict['A'])
             all_params.append(p_dict['B'])
         return all_params
+
+    def save_pretrained(self, save_directory: str):
+        import os
+        os.makedirs(save_directory, exist_ok=True)
+        # Filter for only LoRA weights
+        state_dict = {}
+        for key, p_dict in self.params.items():
+            state_dict[f"{key}.lora_A"] = p_dict['A'].data.cpu()
+            state_dict[f"{key}.lora_B"] = p_dict['B'].data.cpu()
+        
+        torch.save(state_dict, os.path.join(save_directory, "adapter_model.bin"))
+
+    def load_pretrained(self, load_directory: str):
+        import os
+        weight_path = os.path.join(load_directory, "adapter_model.bin")
+        if not os.path.exists(weight_path):
+            raise FileNotFoundError(f"Adapter weights not found in {load_directory}")
+        
+        state_dict = torch.load(weight_path, map_location="cpu")
+        for full_key, tensor in state_dict.items():
+            # full_key is e.g. "1.self_attn.q_proj.lora_A"
+            parts = full_key.split(".")
+            param_type = parts[-1] # lora_A or lora_B
+            key = ".".join(parts[:-1]) # e.g. "1.self_attn.q_proj"
+            
+            if key not in self.params:
+                self.params[key] = {}
+            
+            p_dict = self.params[key]
+            if param_type == "lora_A":
+                if 'A' not in p_dict:
+                    p_dict['A'] = nn.Parameter(tensor.to(self.device), requires_grad=True)
+                else:
+                    p_dict['A'].data.copy_(tensor.to(self.device))
+            elif param_type == "lora_B":
+                if 'B' not in p_dict:
+                    p_dict['B'] = nn.Parameter(tensor.to(self.device), requires_grad=True)
+                else:
+                    p_dict['B'].data.copy_(tensor.to(self.device))

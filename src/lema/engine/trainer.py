@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import threading
+import os
 from typing import Any, Optional, List, Union
 from ..core.memory import TripleBufferManager
 from ..models.base import LemaModelAdapter
@@ -10,9 +11,10 @@ class LemaTrainer:
     def __init__(self, 
                  config: LemaConfig,
                  model_adapter: LemaModelAdapter, 
-                 gbi, 
-                 lora_manager=None, 
-                 optimizer=None):
+                 gbi: Any, 
+                 lora_manager: Any = None, 
+                 optimizer: Optional[torch.optim.Optimizer] = None,
+                 memory_manager: Optional[TripleBufferManager] = None):
         
         self.config = config
         self.adapter = model_adapter
@@ -20,15 +22,26 @@ class LemaTrainer:
         self.device = config.device
         self.strategy = config.strategy
         
-        # Initialize Memory Manager with config strategy
-        # Note: TripleBufferManager might need updates to accept config too, 
-        # but for now we map config values to its expected args
-        self.memory = TripleBufferManager(gbi, model_adapter, self.device, strategy=self.strategy)
+        # Use provided memory manager or create a new one
+        if memory_manager is not None:
+            self.memory = memory_manager
+        else:
+            self.memory = TripleBufferManager(gbi, model_adapter, self.device, strategy=self.strategy)
         
         self.layers = self.adapter.get_layer_metadata()
         self.lora_manager = lora_manager
         self.optimizer = optimizer
+        self.global_step = 0
+
+    def save_checkpoint(self, save_directory: str):
+        """Saves the model state (config + LoRA) and optionally optimizer state."""
+        self.config.save_pretrained(save_directory)
+        if self.lora_manager:
+            self.lora_manager.save_pretrained(save_directory)
         
+        if self.optimizer:
+            torch.save(self.optimizer.state_dict(), os.path.join(save_directory, "optimizer.bin"))
+
     def train_step(self, inputs: Any, labels: Optional[torch.Tensor] = None):
         """
         Executes one forward pass and one backward pass.
@@ -152,4 +165,11 @@ class LemaTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad()
             
+        self.global_step += 1
+        
+        # Automatic checkpointing
+        if self.config.save_steps > 0 and self.global_step % self.config.save_steps == 0:
+            checkpoint_path = os.path.join(self.config.output_dir, f"checkpoint-{self.global_step}")
+            self.save_checkpoint(checkpoint_path)
+
         return logits, loss_val

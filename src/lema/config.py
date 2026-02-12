@@ -13,6 +13,7 @@ class LemaConfig:
     """
     # Model Settings
     model_name_or_path: str
+    model_type: Optional[str] = None # 'llama' or 'gpt2', auto-detected if None
     gbi_path: Optional[str] = None # Path to converted safetensors for GBI
     
     # Hardware / Memory Settings
@@ -34,6 +35,10 @@ class LemaConfig:
     max_seq_length: int = 512
     gradient_checkpointing: bool = False
     
+    # Checkpointing Settings
+    save_steps: int = 500
+    output_dir: str = "output"
+    
     # Advanced
     dtype: str = "float16" # float16, bfloat16, float32
     attn_implementation: str = "eager" # eager, sdpa, flash_attention_2
@@ -54,3 +59,31 @@ class LemaConfig:
             k: v.value if isinstance(v, Enum) else v 
             for k, v in self.__dict__.items()
         }
+
+    def save_pretrained(self, save_directory: str):
+        import os
+        import json
+        os.makedirs(save_directory, exist_ok=True)
+        config_file = os.path.join(save_directory, "lema_config.json")
+        with open(config_file, "w") as f:
+            json.dump(self.to_dict(), f, indent=4)
+
+    @classmethod
+    def from_pretrained(cls, load_directory: str, **kwargs):
+        import os
+        import json
+        config_file = os.path.join(load_directory, "lema_config.json")
+        if not os.path.exists(config_file):
+            raise FileNotFoundError(f"Config file not found in {load_directory}")
+        
+        with open(config_file, "r") as f:
+            config_dict = json.load(f)
+        
+        # Override with kwargs
+        config_dict.update(kwargs)
+        
+        # Handle enum conversion
+        if "strategy" in config_dict and isinstance(config_dict["strategy"], str):
+            config_dict["strategy"] = MemoryStrategy(config_dict["strategy"])
+            
+        return cls(**config_dict)

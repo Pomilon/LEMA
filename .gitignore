@@ -76,3 +76,4 @@ wandb/
 *_results.txt
 kaggle_status*.log
 results/
+*-metadata.json
