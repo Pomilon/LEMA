@@ -1,5 +1,9 @@
 # LEMA: Layer-wise Efficient Memory Abstraction
 
+## Fine-tuned model (PoC)
+
+I've successfully used LEMA to fine-tune on a custom chat tempalte. While it successfully learned the new vocabulary and special tags, it has not yet mastered the logical structure or grammar of the custom template. You can find the model over [Here](https://huggingface.co/Pomilon/LEMA-llama-2-7b).
+
 **Virtualize GPU VRAM for LLM Fine-Tuning**
 
 LEMA is a specialized framework designed to facilitate the fine-tuning of Large Language Models (LLMs) on hardware where model size exceeds available VRAM. By treating model weights as addressable binary segments and implementing a **Triple-Buffer Strategy**, LEMA allows training 7B+ models on GPUs with as little as 16GB VRAM.
