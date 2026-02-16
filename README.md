@@ -2,7 +2,7 @@
 
 ## Fine-tuned model (PoC)
 
-I've successfully used LEMA to fine-tune on a custom chat tempalte. While it successfully learned the new vocabulary and special tags, it has not yet mastered the logical structure or grammar of the custom template. You can find the model over [Here](https://huggingface.co/Pomilon/LEMA-llama-2-7b).
+I've successfully used LEMA to fine-tune "NousResearch/Llama-2-7b-hf" on a custom chat tempalte. While it successfully learned the new vocabulary and special tags, it has not yet mastered the logical structure or grammar of the custom template. You can find the model over [Here](https://huggingface.co/Pomilon/LEMA-llama-2-7b).
 
 **Virtualize GPU VRAM for LLM Fine-Tuning**
 
