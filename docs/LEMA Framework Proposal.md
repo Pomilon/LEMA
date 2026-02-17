@@ -8,14 +8,14 @@ LEMA is a specialized framework designed to facilitate the fine-tuning of Large 
 
 ## **2\. Core Concepts**
 
-### **2.1 Binary Indexed Engagement**
+### **2.1 Global Binary Index (GBI)**
 
 Standard model loading (e.g., PyTorch .bin or .pt) involves full deserialization into System RAM. LEMA uses a **Global Binary Index (GBI)**.
 
 * **Zero-Copy Mapping:** Uses mmap to map the model file (preferably in .safetensors format) into the process's virtual address space.  
 * **Header Indexing:** A JSON/Binary header stores the (offset, size, dtype, shape) for every tensor, allowing O(1) access to specific layer weights without scanning the file.
 
-### **2.2 Layer-wise Execution (Patchwork)**
+### **2.2 Layer-wise Execution**
 
 Instead of a monolithic model.forward(), LEMA decomposes the computational graph into a sequence of isolated layer blocks.
 
@@ -55,10 +55,6 @@ To save VRAM, LEMA implements **Segmented Gradient Checkpointing**:
 4. Calculate gradients for Layer ![][image3] LoRA adapters.  
 5. Offload Layer ![][image3] weights; move to Layer ![][image5].
 
-### **4.3 Optimizer Offloading**
-
-The **Adam Optimizer states** (Momentum and Variance) are stored in System RAM. During the weight update step, LEMA pulls only the specific optimizer slice for the current layer's adapters into VRAM, performs the update, and pushes it back.
-
 ## **5\. Technical Implementation Stack**
 
 * **Host Language:** Python (Orchestration) / C++ (High-speed Memory Management).  
@@ -73,5 +69,5 @@ The **Adam Optimizer states** (Momentum and Variance) are stored in System RAM. 
 | :---- | :---- | :---- |
 | **VRAM Requirement** | Full Model \+ Gradients | \~2 Layers \+ Buffers |
 | **System RAM Usage** | Model Size | Model Size (via mmap/Page Cache) |
-| **Speed** | 100% (Baseline) | 60-80% (PCIe Latency) |
+| **Speed** | 100% (Baseline) | 30-70% (PCIe Latency) |
 | **Model Scalability** | Limited by GPU VRAM | Limited by Disk Space |

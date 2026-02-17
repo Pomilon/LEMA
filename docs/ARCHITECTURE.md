@@ -42,5 +42,7 @@ LEMA uses a specialized indexer to bypass standard PyTorch/Pickle deserializatio
 
 ## Performance Trade-offs
 -   **VRAM Efficiency**: ~50-70% reduction for 7B+ models.
--   **Compute Overhead**: 1.2x - 1.8x slowdown compared to fully resident training, depending on PCIe bandwidth and disk speed.
--   **System RAM**: Requires space equal to the model size (or less if using aggressive disk streaming).
+-   **Compute Overhead**: 1.5x - 3.5x slowdown compared to fully resident training, depending on PCIe bandwidth and disk speed.
+-   **System RAM**: 
+    -   **STREAMING Mode**: ~2.5 GB (Pinned buffers).
+    -   **RESIDENT Mode**: Requires space equal to the model size.

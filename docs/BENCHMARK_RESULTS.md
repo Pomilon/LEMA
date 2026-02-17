@@ -1,4 +1,4 @@
-# LEMA Benchmark Results (v0.7 - Release Candidate)
+# LEMA Benchmark Results (v1.0.0)
 
 Benchmarks were performed on **Kaggle (Tesla P100 GPU, 16GB VRAM)**.
 Comparisons were made between **Standard PEFT (LoRA)** and **LEMA (Streaming Strategy)**.
@@ -16,8 +16,9 @@ LEMA demonstrates significant VRAM savings, particularly for larger models where
 | **GPT-2 (Small)** | 124M | 0.44 GB | 1.05 GB | N/A* |
 | **TinyLlama** | 1.1B | 2.67 GB | **2.12 GB** | **20.5%** |
 | **SmolLM2** | 1.7B | 3.88 GB | **3.20 GB** | **17.6%** |
-| **Llama-2** | 7B | **13.99 GB** (Load Only)** | **5.90 GB** | **57.9%** |
+| **Llama-2** | 7B | **13.99 GB** (Load Only)** | **5.90 GB*** | **57.9%** |
 
+*\*Note on Llama-2 7B VRAM: The 5.90 GB figure represents a benchmark run with Batch Size 1 and Sequence Length 128. For the full training run (Batch Size 8, Seq 512) used for the HuggingFace model, peak VRAM was 6.36 GB.*
 *\*Note on GPT-2: For extremely small models, LEMA's fixed buffering overhead exceeds the model size. LEMA is optimized for Large-scale models.*
 *\**Note on Llama-2 7B: Standard PEFT can load the model (13.99GB) but fails immediately with **Out-Of-Memory (OOM)** when attempting a training step due to gradients/activations. LEMA trains comfortably with >10GB headroom.*
 

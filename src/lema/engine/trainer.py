@@ -32,6 +32,7 @@ class LemaTrainer:
         self.lora_manager = lora_manager
         self.optimizer = optimizer
         self.global_step = 0
+        self.accumulation_step = 0
 
     def save_checkpoint(self, save_directory: str):
         """Saves the model state (config + LoRA) and optionally optimizer state."""
@@ -139,13 +140,15 @@ class LemaTrainer:
             if i == last_idx:
                 if labels is not None:
                     # Real Causal LM Loss
-                    # Shift so that tokens < n predict n
                     shift_logits = output[..., :-1, :].contiguous()
                     shift_labels = labels[..., 1:].contiguous()
                     loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
                     loss_val = loss.item()
+                    
+                    # Normalize for gradient accumulation
+                    loss = loss / self.config.gradient_accumulation_steps
                 else:
-                    loss = output.mean() # Dummy
+                    loss = output.mean() / self.config.gradient_accumulation_steps
                 
                 loss.backward()
                 grad_output = layer_input.grad
@@ -161,14 +164,16 @@ class LemaTrainer:
                 self.adapter.release_layer_module(layer_module)
             del layer_module
 
-        if self.optimizer:
+        self.accumulation_step += 1
+        
+        if self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
             self.optimizer.step()
             self.optimizer.zero_grad()
             
         self.global_step += 1
         
-        # Automatic checkpointing
-        if self.config.save_steps > 0 and self.global_step % self.config.save_steps == 0:
+        # Automatic checkpointing (only after optimizer step)
+        if self.config.save_steps > 0 and self.global_step % (self.config.save_steps * self.config.gradient_accumulation_steps) == 0:
             checkpoint_path = os.path.join(self.config.output_dir, f"checkpoint-{self.global_step}")
             self.save_checkpoint(checkpoint_path)
 

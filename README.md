@@ -16,7 +16,10 @@ LEMA is a specialized framework designed to facilitate the fine-tuning of Large 
 | :--- | :--- | :--- | :--- | :--- |
 | **TinyLlama 1.1B** | 2.67 GB | **2.12 GB** | **20.5%** | **Stable** |
 | **SmolLM2 1.7B** | 3.88 GB | **3.20 GB** | **17.6%** | **Stable** |
-| **Llama-2 7B** | 13.99 GB* | **5.90 GB** | **~58%** | **LEMA Recommended** |
+| **Llama-2 7B** | 13.99 GB* | **5.90 GB*** | **~58%** | **LEMA Recommended** |
+
+*VRAM Note: 5.90 GB is for Seq 128. For Seq 512, peak VRAM is 6.36 GB.*
+*Note on Llama-2 7B: Standard PEFT can load the model but fails with OOM during training.*
 
 ![VRAM Benchmark](docs/assets/vram_benchmark.png)
 
@@ -33,7 +36,7 @@ The primary value of LEMA is not just "fitting" the model, but providing the **c
 
 ## Core Features
 
-- **Binary Indexed Engagement (GBI)**: Zero-copy mapping of `.safetensors` files using `mmap`.
+- **Global Binary Index (GBI)**: Zero-copy mapping of `.safetensors` files using `mmap`.
 - **Triple-Buffer Pipeline**: Pipelined data movement (Disk -> RAM -> VRAM) to hide PCIe latency.
 - **High-Level API**: Simplified `LemaModel` and `LemaTrainer` interfaces for fast integration.
 - **Automatic Checkpointing**: Built-in interval-based saving of LoRA adapters and optimizer states.

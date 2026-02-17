@@ -32,12 +32,13 @@ class TripleBufferManager:
         # RAM Buffers
         if self.strategy == MemoryStrategy.RESIDENT:
             print(f"LEMA: Initializing RESIDENT strategy (Caching model in RAM)...")
-            self.ram_flat_buffers: Dict[int, torch.Tensor] = {}
+            # Dict[layer_id, Tensor]
+            self.ram_buffers: Dict[int, torch.Tensor] = {}
             self._initialize_full_ram_cache()
         else:
             print(f"LEMA: Initializing STREAMING strategy (Default)...")
-            # In streaming mode, we only need 2 RAM slots for the pipeline
-            self.ram_flat_buffers: List[torch.Tensor] = [
+            # List[Tensor] (Double buffering slots)
+            self.ram_buffers: List[torch.Tensor] = [
                 torch.empty(self.max_params, device="cpu", dtype=torch.float32).pin_memory() if self.is_cuda else torch.empty(self.max_params, device="cpu", dtype=torch.float32)
                 for _ in range(2)
             ]
@@ -69,7 +70,7 @@ class TripleBufferManager:
             total_el = sum(w.numel() for w in weights.values())
             buf = torch.empty(total_el, device="cpu", dtype=torch.float32).pin_memory()
         else:
-            buf = self.ram_flat_buffers[slot]
+            buf = self.ram_buffers[slot]
             
         offset = 0
         for name in param_names:
@@ -79,7 +80,7 @@ class TripleBufferManager:
             offset += numel
             
         if is_resident:
-            self.ram_flat_buffers[layer_id] = buf
+            self.ram_buffers[layer_id] = buf
         else:
             self.ram_layer_ids[slot] = layer_id
 
@@ -96,11 +97,11 @@ class TripleBufferManager:
     def async_transfer_to_vram(self, layer_id: int, vram_slot: int, ram_slot: Optional[int] = None):
         """Stage 2: Async transfer to GPU."""
         if self.strategy == MemoryStrategy.RESIDENT:
-            src_buf = self.ram_flat_buffers[layer_id]
+            src_buf = self.ram_buffers[layer_id]
         else:
             if ram_slot is None:
                 raise ValueError("ram_slot must be provided in streaming mode")
-            src_buf = self.ram_flat_buffers[ram_slot]
+            src_buf = self.ram_buffers[ram_slot]
             
         vram_dest = self.vram_flat_buffers[vram_slot]
         
