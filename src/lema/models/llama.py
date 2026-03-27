@@ -11,7 +11,7 @@ class LlamaAdapter(LemaModelAdapter):
         self.hf_config = LlamaConfig(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
             self.hf_config._attn_implementation = config.get("attn_implementation", "eager")
-        self.rotary_emb = LlamaRotaryEmbedding(self.hf_config)
+        self.rotary_emb = LlamaRotaryEmbedding(self.hf_config.hidden_size // self.hf_config.num_attention_heads, max_position_embeddings=self.hf_config.max_position_embeddings)
         self.layer_pool: List[nn.Module] = []
         self.param_mappings: Dict[int, List[tuple]] = {}
         self._max_pool_size = 8

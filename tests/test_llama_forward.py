@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from src.lema.models.llama import LlamaAdapter
+from lema.models.llama import LlamaAdapter
 from transformers import LlamaConfig
 
 def test_llama_adapter_forward():

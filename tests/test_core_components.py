@@ -1,9 +1,9 @@
 import pytest
 import torch
 import torch.nn as nn
-from src.lema.core.gbi import GlobalBinaryIndex
-from src.lema.core.lora import LoRAManager, LoRAWrapper
-from src.lema.core.memory import TripleBufferManager
+from lema.core.gbi import GlobalBinaryIndex
+from lema.core.lora import LoRAManager, LoRAWrapper
+from lema.core.memory import TripleBufferManager
 
 # Mocking
 class MockAdapter:

@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 from transformers import GPT2Config, GPT2LMHeadModel
 from safetensors.torch import save_file
-from src.lema.core.gbi import GlobalBinaryIndex
-from src.lema.models.gpt2 import GPT2Adapter
-from src.lema.engine.trainer import LemaTrainer
-from src.lema.config import LemaConfig, MemoryStrategy
+from lema.core.gbi import GlobalBinaryIndex
+from lema.models.gpt2 import GPT2Adapter
+from lema.engine.trainer import LemaTrainer
+from lema.config import LemaConfig, MemoryStrategy
 import os
 import pytest
 

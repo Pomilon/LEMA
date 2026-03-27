@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.0.0",
-    "transformers>=4.30.0",
+    "transformers>=4.30.0,<5.0.0",
     "safetensors>=0.3.0",
     "accelerate>=0.20.0",
     "peft>=0.4.0",
