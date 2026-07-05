@@ -1,10 +1,14 @@
 from .base import LemaModelAdapter
 from .llama import LlamaAdapter
 from .gpt2 import GPT2Adapter
+from .mistral import MistralAdapter
+from .mixtral import MixtralAdapter
 
 _ADAPTER_REGISTRY = {
     "llama": LlamaAdapter,
-    "gpt2": GPT2Adapter
+    "gpt2": GPT2Adapter,
+    "mistral": MistralAdapter,
+    "mixtral": MixtralAdapter
 }
 
 def get_adapter(model_type: str, config: dict) -> LemaModelAdapter:

@@ -11,9 +11,11 @@ class GPT2Adapter(LemaModelAdapter):
         self.hf_config = GPT2Config(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
             self.hf_config._attn_implementation = config.get("attn_implementation", "eager")
-        self.layer_pool: List[nn.Module] = []
+        # Permanent module cache: created once, reused across all steps
+        self.module_pool: List[nn.Module] = []
+        self._max_pool_size = 3
         self.param_mappings: Dict[int, List[tuple]] = {}
-        
+
     def get_layer_metadata(self) -> List[Dict[str, Any]]:
         layers = []
         layers.append({'id': 0, 'name': 'embeddings', 'type': 'embedding'})
@@ -42,38 +44,41 @@ class GPT2Adapter(LemaModelAdapter):
 
     def construct_layer_module(self, layer_id: int, flat_buffer: Optional[torch.Tensor] = None, lora_manager: Optional[Any] = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
+
         module = None
-        for i, m in enumerate(self.layer_pool):
+        for i, m in enumerate(self.module_pool):
             if layer_id == 0 and isinstance(m, GPT2EmbeddingsLayer):
-                module = self.layer_pool.pop(i); break
+                module = self.module_pool.pop(i); break
             elif layer_id == self.hf_config.n_layer + 1 and isinstance(m, GPT2HeadLayer):
-                module = self.layer_pool.pop(i); break
+                module = self.module_pool.pop(i); break
             elif 1 <= layer_id <= self.hf_config.n_layer and isinstance(m, GPT2Block):
-                module = self.layer_pool.pop(i); break
-        
+                module = self.module_pool.pop(i); break
+
         if module is None:
-            if layer_id == 0: module = GPT2EmbeddingsLayer(self.hf_config)
-            elif layer_id == self.hf_config.n_layer + 1: module = GPT2HeadLayer(self.hf_config)
+            dtype_str = self.config.get("dtype", "float32")
+            target_dtype = getattr(torch, dtype_str) if dtype_str else torch.float32
+            if layer_id == 0:
+                module = GPT2EmbeddingsLayer(self.hf_config)
+            elif layer_id == self.hf_config.n_layer + 1:
+                module = GPT2HeadLayer(self.hf_config)
             else:
                 module = GPT2Block(self.hf_config)
-            
-            # Initialization only
-            module.to(device)
+            module.to(device=device, dtype=target_dtype)
 
-        if lora_manager and 1 <= layer_id <= self.hf_config.n_layer:
-            lora_manager.update_lora_params(layer_id, module)
+            if lora_manager and 1 <= layer_id <= self.hf_config.n_layer:
+                lora_manager.update_lora_params(layer_id, module)
 
-        if id(module) not in self.param_mappings:
             self.param_mappings[id(module)] = self._create_mapping(layer_id, module)
+
+        if flat_buffer is not None and next(module.parameters()).device != flat_buffer.device:
+            module.to(flat_buffer.device)
 
         if flat_buffer is not None:
             mapping = self.param_mappings[id(module)]
-            offset = 0
             with torch.no_grad():
-                for param, numel, shape in mapping:
-                    param.data.copy_(flat_buffer[offset : offset + numel].view(shape), non_blocking=True)
-                    offset += numel
-            
+                for param, offset, numel, shape in mapping:
+                    param.data.copy_(flat_buffer[offset:offset+numel].view(shape), non_blocking=True)
+
         return module
 
     def _create_mapping(self, layer_id: int, module: nn.Module) -> List[tuple]:
@@ -81,6 +86,7 @@ class GPT2Adapter(LemaModelAdapter):
         idx = layer_id - 1
         module_params = dict(module.named_parameters())
         mapping = []
+        offset = 0
         for full_name in names:
             if layer_id == 0:
                 clean_k = "wte.weight" if "wte" in full_name else "wpe.weight"
@@ -90,14 +96,16 @@ class GPT2Adapter(LemaModelAdapter):
             else:
                 prefix = f"transformer.h.{idx}."
                 clean_k = full_name[len(prefix):]
-                if clean_k not in module_params: clean_k = clean_k.replace(".weight", ".base_layer.weight").replace(".bias", ".base_layer.bias")
+                if clean_k not in module_params:
+                    clean_k = clean_k.replace(".weight", ".base_layer.weight").replace(".bias", ".base_layer.bias")
             param = module_params[clean_k]
-            mapping.append((param, param.numel(), param.shape))
+            numel = param.numel()
+            mapping.append((param, offset, numel, param.shape))
+            offset += numel
         return mapping
 
     def release_layer_module(self, module: nn.Module):
-        if len(self.layer_pool) < 5:
-            self.layer_pool.append(module)
+        pass  # Permanent modules — keep alive
 
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs

@@ -14,17 +14,24 @@ def break_shared_weights(model: torch.nn.Module):
             model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.clone())
     return model
 
-def prepare_monolithic_safetensors(model_name_or_path: str, output_path: str, device: str = "auto"):
+def prepare_monolithic_safetensors(model_name_or_path: str, output_path: str, device: str = "cpu", cache_dir: str = None):
     """
     Downloads a model and saves it as a single, framework-compatible safetensors file.
-    Uses 'auto' device map to offload to GPU and save System RAM during conversion.
+    Defaulting to 'cpu' for conversion is safer for various GPU architectures (e.g. P100 vs T4).
     """
-    print(f"Loading {model_name_or_path} for monolithic conversion...")
+    if cache_dir is None and os.path.exists("/kaggle/working"):
+        # In Kaggle, use /tmp to avoid filling up the working directory (which has limited space and is for output)
+        cache_dir = "/tmp/huggingface_cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        print(f"Setting default Kaggle cache directory to {cache_dir}")
+
+    print(f"Loading {model_name_or_path} for monolithic conversion (using {device})...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        device_map=device
+        device_map=device,
+        cache_dir=cache_dir
     )
     model = break_shared_weights(model)
     

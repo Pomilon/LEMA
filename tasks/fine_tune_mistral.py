@@ -2,10 +2,11 @@ import torch
 import os
 import time
 from transformers import AutoTokenizer
-from lema import LemaConfig, LemaModel, MemoryStrategy, logger
+from lema import LemaConfig, LemaModel, MemoryStrategy
+from lema.utils.model_utils import prepare_monolithic_safetensors
 
-MODEL_NAME = "NousResearch/Llama-2-7b-hf"
-MODEL_PATH = "llama2_7b.safetensors"
+MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+MODEL_PATH = "mistral_7b.safetensors"
 
 TRAINING_DATA = [
     "What is photosynthesis? Photosynthesis is the process by which plants use sunlight to synthesize nutrients from carbon dioxide and water.",
@@ -15,13 +16,16 @@ TRAINING_DATA = [
     "What is LEMA? LEMA is a framework that virtualizes GPU memory to enable training large models on limited hardware.",
 ] * 5
 
-def fine_tune_llama_7b():
-    logger.info("--- STARTING LEMA 7B FINE-TUNING ---")
+def fine_tune_mistral():
+    print("--- STARTING MISTRAL FINE-TUNING ---")
     
+    if not os.path.exists(MODEL_PATH):
+        print(f"Preparing {MODEL_PATH}...")
+        prepare_monolithic_safetensors(MODEL_NAME, MODEL_PATH)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     
-    # LemaModel handles auto-conversion if MODEL_PATH is missing!
     config = LemaConfig(
         model_name_or_path=MODEL_NAME,
         gbi_path=MODEL_PATH,
@@ -38,15 +42,15 @@ def fine_tune_llama_7b():
     optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=config.learning_rate)
     trainer = model.get_trainer(optimizer)
     
-    logger.info(f"Training on {len(TRAINING_DATA)} examples...")
+    print(f"\nTraining on {len(TRAINING_DATA)} examples...")
     start_time = time.time()
     for text in TRAINING_DATA:
         inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
         input_ids = inputs["input_ids"].to("cuda")
-        trainer.train_step(input_ids, labels=input_ids)
+        logits, loss = trainer.train_step(input_ids, labels=input_ids)
             
-    logger.info(f"Training completed in {time.time() - start_time:.2f} seconds.")
-    trainer.save_checkpoint("output/llama-7b-final")
+    print(f"Training completed in {time.time() - start_time:.2f} seconds.")
+    trainer.save_checkpoint("output/mistral-final")
 
 if __name__ == "__main__":
-    fine_tune_llama_7b()
+    fine_tune_mistral()

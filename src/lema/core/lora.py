@@ -34,12 +34,13 @@ class LoRAManager:
     """
     Manages the lifecycle and storage of LoRA parameters.
     """
-    def __init__(self, config: Dict, device="cuda"):
+    def __init__(self, config: Dict, device="cuda", dtype=None):
         self.rank = config.get("r", 8)
         self.alpha = config.get("alpha", 16)
         self.target_modules = config.get("target_modules", ["c_attn", "c_proj", "c_fc"])
         self.device = device
-        
+        self.dtype = dtype if dtype is not None else torch.float32
+
         # Store parameters: key -> {'A': Param, 'B': Param}
         self.params: Dict[str, Dict[str, nn.Parameter]] = {}
         
@@ -47,10 +48,10 @@ class LoRAManager:
         key = f"{layer_id}.{module_name}"
         
         if key not in self.params:
-            lora_A = torch.zeros((self.rank, in_features), device=self.device)
+            lora_A = torch.zeros((self.rank, in_features), device=self.device, dtype=self.dtype)
             nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
             
-            lora_B = torch.zeros((out_features, self.rank), device=self.device)
+            lora_B = torch.zeros((out_features, self.rank), device=self.device, dtype=self.dtype)
             nn.init.zeros_(lora_B)
             
             self.params[key] = {

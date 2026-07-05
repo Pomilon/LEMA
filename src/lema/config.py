@@ -19,8 +19,16 @@ class LemaConfig:
     # Hardware / Memory Settings
     device: str = "cuda"
     strategy: MemoryStrategy = MemoryStrategy.STREAMING
-    ram_buffer_size: int = 2 # Number of layers to keep in RAM
-    vram_buffer_size: int = 1 # Number of layers to keep in VRAM
+    ram_buffer_size: int = 2 # Deprecated: Fixed number of layers in RAM
+    vram_buffer_size: int = 1 # Deprecated: Fixed number of layers in VRAM
+    
+    # Memory Budgeting (GB)
+    # If 0, LEMA will automatically detect and use ~70% of available resources
+    max_ram_gb: float = 0.0     
+    max_vram_gb: float = 0.0    
+    vram_fraction: float = 0.8  # Fraction of total VRAM to allow PyTorch to use
+    prefetch_distance: int = 2 # How many layers ahead to prefetch
+
     
     # LoRA Settings
     use_lora: bool = True
@@ -51,8 +59,9 @@ class LemaConfig:
             else:
                 self.gbi_path = "model.safetensors"
         
-        if isinstance(self.strategy, str):
-            self.strategy = MemoryStrategy(self.strategy.lower())
+        strat = self.strategy
+        if isinstance(strat, str):
+            self.strategy = MemoryStrategy(strat.lower())
 
     def to_dict(self) -> Dict[str, Any]:
         return {
