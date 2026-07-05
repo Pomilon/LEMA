@@ -259,7 +259,11 @@ class LemaModel:
                  max_new_tokens: int = 50,
                  do_sample: bool = True,
                  temperature: float = 0.7):
-        """Simple greedy/sampling generation for quick model verification."""
+        """Simple generation for quick model verification."""
+        # Clear per-layer caches (may be stale from training at different seq_len)
+        for attr in ['_cache_seq', '_cache_pos', '_cache_mask', '_cache_rope']:
+            if hasattr(self.adapter, attr):
+                delattr(self.adapter, attr)
         trainer = self.get_trainer(None) 
         
         inputs = tokenizer(prompt, return_tensors="pt").to(self.config.device)

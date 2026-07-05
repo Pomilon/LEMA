@@ -132,9 +132,14 @@ class LlamaAdapter(LemaModelAdapter):
         return mapping
 
     def release_layer_module(self, module: nn.Module):
-        """Return module to sliding-window pool. Keeps VRAM constant (max pool_size modules)."""
+        """Return module to sliding-window pool. Discarded modules free their GPU memory."""
         if len(self.module_pool) < self._max_pool_size:
             self.module_pool.append(module)
+        else:
+            for p in module.parameters():
+                del p.data
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs

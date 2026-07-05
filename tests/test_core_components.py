@@ -3,12 +3,6 @@ import torch
 import torch.nn as nn
 from lema.core.gbi import GlobalBinaryIndex
 from lema.core.lora import LoRAManager, LoRAWrapper
-from lema.core.memory import TripleBufferManager
-
-# Mocking
-class MockAdapter:
-    def get_param_names_for_layer(self, layer_id):
-        return ["test.weight"]
 
 def test_gbi_loading(tmp_path):
     # Create a dummy safetensors file
