@@ -9,7 +9,7 @@ LEMA requires model weights in a single, non-sharded `.safetensors` format. We p
 ### Recommended Conversion
 
 ```python
-from lema.utils.model_utils import prepare_monolithic_safetensors
+from lema._utils._model_utils import prepare_monolithic_safetensors
 
 # This handles downloading, shared-weight cloning, and monolithic saving
 prepare_monolithic_safetensors(

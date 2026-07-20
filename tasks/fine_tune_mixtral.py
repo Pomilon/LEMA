@@ -3,7 +3,7 @@ import os
 import time
 from transformers import AutoTokenizer
 from lema import LemaConfig, LemaModel, MemoryStrategy
-from lema.utils.model_utils import prepare_monolithic_safetensors
+from lema._utils.model_utils import prepare_monolithic_safetensors
 
 MODEL_NAME = "mistralai/Mixtral-8x7B-v0.1"
 MODEL_PATH = "mixtral_8x7b.safetensors"
@@ -29,7 +29,6 @@ def fine_tune_mixtral():
         gbi_path=MODEL_PATH,
         device="cuda",
         strategy=MemoryStrategy.STREAMING,
-        learning_rate=5e-5,
         lora_rank=16,
         gradient_checkpointing=True
     )

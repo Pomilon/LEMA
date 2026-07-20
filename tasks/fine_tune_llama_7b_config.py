@@ -2,11 +2,11 @@ import torch
 import os
 import time
 from transformers import AutoTokenizer, AutoConfig
-from src.lema.core.gbi import GlobalBinaryIndex
-from src.lema.models.llama import LlamaAdapter
-from src.lema.engine.trainer import LemaTrainer
-from src.lema.core.lora import LoRAManager
-from src.lema.config import LemaConfig, MemoryStrategy
+from lema.gbi import GlobalBinaryIndex
+from lema.adapters.llama import LlamaAdapter
+from lema.trainer import LemaTrainer
+from lema.lora import LoRAManager
+from lema import LemaConfig, MemoryStrategy
 
 MODEL_NAME = "NousResearch/Llama-2-7b-hf"
 MODEL_PATH = "llama2_7b.safetensors"
@@ -29,7 +29,7 @@ def fine_tune_llama_7b_with_config():
         strategy=MemoryStrategy.STREAMING,
         lora_rank=16,
         lora_alpha=32,
-        learning_rate=5e-5,
+    learning_rate=5e-5,
         dtype="float16"
     )
     

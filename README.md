@@ -1,53 +1,52 @@
 # LEMA: Layer-wise Efficient Memory Abstraction
 
-## Fine-tuned model (PoC)
-
-I've successfully used LEMA to fine-tune "NousResearch/Llama-2-7b-hf" on a custom chat tempalte. While it successfully learned the new vocabulary and special tags, it has not yet mastered the logical structure or grammar of the custom template. You can find the model over [Here](https://huggingface.co/Pomilon/LEMA-llama-2-7b).
-
-The training code and pipeline of the model will be polished and published soon for reproducibility.
-
 **Virtualize GPU VRAM for LLM Fine-Tuning**
 
-LEMA is a specialized framework designed to facilitate the fine-tuning of Large Language Models (LLMs) on hardware where model size exceeds available VRAM. By treating model weights as addressable binary segments and implementing a **Triple-Buffer Strategy**, LEMA allows training 7B+ models on GPUs with as little as 16GB VRAM.
+LEMA is a framework for fine-tuning Large Language Models on GPUs where model size exceeds available VRAM. By treating model weights as addressable binary segments and implementing a **Triple-Buffer Strategy** (Disk → RAM → VRAM) with async prefetching, LEMA allows training 7B+ models on GPUs with as little as 16GB VRAM.
 
-## Key Performance (Tesla P100 - 16GB)
+## Key Performance (Tesla T4 — 14.6 GB)
 
-| Model | Standard PEFT VRAM | LEMA VRAM | Savings | Status (Fine-Tuning) |
-| :--- | :--- | :--- | :--- | :--- |
-| **TinyLlama 1.1B** | 2.67 GB | **2.12 GB** | **20.5%** | **Stable** |
-| **SmolLM2 1.7B** | 3.88 GB | **3.20 GB** | **17.6%** | **Stable** |
-| **Llama-2 7B** | 13.99 GB* | **5.90 GB*** | **~58%** | **LEMA Recommended** |
+| Model | Config | PEFT VRAM | LEMA VRAM | LEMA Step |
+|---|---|---|---|---|
+| **TinyLlama 1.1B** | bs=1, seq=512 | 5.0 GB | **1.4 GB** | 2297 ms |
+| **TinyLlama 1.1B** | bs=8, seq=512 | OOM | **3.5 GB** | 21087 ms |
+| **Llama-2 7B** | bs=1, seq=128 | OOM | **2.9 GB** | 3920 ms |
+| **Llama-2 7B** | bs=2, seq=512 | OOM | **3.8 GB** | 4920 ms |
+| **Llama-2 7B** | bs=8, seq=512 | OOM | **6.6 GB** | 12816 ms |
+| **Llama-2 7B** | seq=2048, bs=1 | OOM | **6.3 GB** | 8414 ms |
 
-*VRAM Note: 5.90 GB is for Seq 128. For Seq 512, peak VRAM is 6.36 GB.*
-*Note on Llama-2 7B: Standard PEFT can load the model but fails with OOM during training.*
+PEFT OOMs on Llama-2 7B at every configuration on a 14.6 GB T4. LEMA trains at **2.9–6.6 GB** — under half the VRAM — across all batch sizes and up to 2048 sequence length.
 
-![VRAM Benchmark](docs/assets/vram_benchmark.png)
+![VRAM](docs/assets/vram_benchmark.png) | ![Speed](docs/assets/speed_benchmark.png)
+:---: | :---:
+VRAM Usage (bs=1, seq=512) | Training Speed (bs=1, seq=512)
 
-![Speed Benchmark](docs/assets/speed_benchmark.png)
+[Full benchmark results](docs/BENCHMARK_RESULTS.md) — VRAM stability, long sequence headroom, C++ backend comparison, and full scaling matrix.
 
-*\*Note: At sequence length 128, Standard PEFT narrowly fits in 16GB VRAM. However, increasing the workload to a standard sequence length of 512 causes an immediate **Out-Of-Memory (OOM)** crash. LEMA maintains a consistent ~6GB footprint even as sequence length scales, providing over **10GB of headroom** for activations and larger batches.*
+## Fine-tuned Model (PoC)
 
-### The Headroom Advantage
+Successfully fine-tuned `NousResearch/Llama-2-7b-hf` on a custom chat template using an earlier version of LEMA. Available at [huggingface.co/Pomilon/LEMA-llama-2-7b](https://huggingface.co/Pomilon/LEMA-llama-2-7b).
 
-The primary value of LEMA is not just "fitting" the model, but providing the **computational headroom** necessary for real-world training. On a 16GB GPU:
+## Features
 
-- **Standard PEFT**: Operating at ~88% VRAM capacity just to load the model and run a minimal step. Zero room for longer contexts or higher batch sizes.
-- **LEMA**: Operating at ~37% VRAM capacity. Allows for significantly larger sequence lengths, higher batch sizes, or even larger models (13B+) on the same hardware
-
-## Core Features
-
-- **Global Binary Index (GBI)**: Zero-copy mapping of `.safetensors` files using `mmap`.
-- **Triple-Buffer Pipeline**: Pipelined data movement (Disk -> RAM -> VRAM) to hide PCIe latency.
-- **High-Level API**: Simplified `LemaModel` and `LemaTrainer` interfaces for fast integration.
-- **Automatic Checkpointing**: Built-in interval-based saving of LoRA adapters and optimizer states.
+- **Triple-Buffer Pipeline**: Disk → pinned RAM → VRAM with async prefetching hides PCIe latency.
+- **Multi-file Support**: Works directly with HuggingFace sharded `.safetensors` (no longer requires monolithic conversion).
+- **C++/Python Backend**: Explicit toggle (`backend="auto" | "cpp" | "python"`).
+- **Auto Flight Check**: Benchmarks your hardware and auto-tunes `prefetch_distance` and strategy.
+- **5 Model Architectures**: Llama, Mistral, Mixtral (MoE), GPT-2, LFM2 (MoE).
+- **Automatic Checkpointing**: Interval-based saving of LoRA adapters and optimizer states.
+- **Module Pool**: Sliding-window module recycling keeps VRAM constant regardless of model depth.
 
 ## Installation
 
 ```bash
 git clone https://github.com/Pomilon/LEMA.git
 cd LEMA
-pip install -e .
+pip install -e .                    # with C++ extension (if CUDA + nvcc available)
+pip install -e . --no-cuda-ext     # pure Python only
 ```
+
+Requires Python ≥ 3.10, PyTorch ≥ 2.0, CUDA-capable GPU.
 
 ## Quick Start
 
@@ -55,42 +54,31 @@ pip install -e .
 import torch
 from lema import LemaConfig, LemaModel, MemoryStrategy
 
-# 1. Configuration
 config = LemaConfig(
     model_name_or_path="NousResearch/Llama-2-7b-hf",
-    gbi_path="llama2_7b.safetensors", # Single monolithic safetensors file
     strategy=MemoryStrategy.STREAMING,
+    backend="auto",              # "auto" | "cpp" | "python"
     lora_rank=16,
-    gradient_checkpointing=True
+    gradient_checkpointing=True,
 )
 
-# 2. Initialize Model & Trainer
-model = LemaModel(config)
-model.initialize_lora() # Pre-initialize adapters
+model = LemaModel(config)        # auto-downloads from HF Hub if needed
+model.initialize_lora()
 
 optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=1e-4)
 trainer = model.get_trainer(optimizer)
 
-# 3. Train
 input_ids = torch.randint(0, 32000, (1, 512)).cuda()
 logits, loss = trainer.train_step(input_ids, labels=input_ids)
 ```
 
 ## Documentation
 
+- [**Benchmark Results**](docs/BENCHMARK_RESULTS.md): Full VRAM and throughput comparison.
+- [**API Reference**](docs/API_REFERENCE.md): Complete class and method specifications.
 - [**User Guide**](docs/USER_GUIDE.md): Model preparation, conversion, and tips.
-- [**API Reference**](docs/API_REFERENCE.md): Detailed class and method specifications.
-- [**Architecture**](docs/ARCHITECTURE.md): Deep dive into the memory pipeline and LEMA-loop.
-
-## Future Roadmap
-
-While LEMA v1.0 is stable and functional for 7B fine-tuning, I aim to significantly reduce the streaming overhead and expand compatibility.
-
-- **C++/CUDA Backend**: I plan to move the `TripleBufferManager` and memory streaming logic from Python to a C++ extension or custom CUDA kernels to bypass the GIL and reduce overhead to the theoretical minimum (~1.1x).
-- **Library Integration**: I am working toward deeper integration with Hugging Face `Trainer` and `Accelerate` for seamless usage in existing pipelines.
-- **Quantization Support**: I intend to implement native support for 8-bit and 4-bit loading within the streaming pipeline for even lower memory footprints.
-- **Model Support**: I am expanding support beyond Llama and GPT-2 to include Mistral, Mixtral (MoE), and other architectures.
+- [**Architecture**](docs/ARCHITECTURE.md): Deep dive into the memory pipeline.
 
 ## License
 
-MIT License - Copyright (c) 2026 Pomilon
+MIT License — Copyright (c) 2026 Pomilon

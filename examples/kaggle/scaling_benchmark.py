@@ -1,260 +1,189 @@
 """
-LEMA vs PEFT Scaling Benchmark.
+LEMA vs PEFT — VRAM & Throughput Scaling Benchmark.
 
 Tests both approaches across increasing batch sizes and sequence lengths
 to demonstrate LEMA's headroom advantage at scale.
-Measures VRAM usage and throughput.
+Includes TinyLlama 1.1B and Llama-2 7B.
 """
 import gc
-import os
-import sys
 import time
 import torch
-import psutil
 
-sys.path.insert(0, "src")
+from lema import LemaConfig, LemaModel, MemoryStrategy
 
-def format_vram() -> str:
-    free, total = torch.cuda.mem_get_info()
-    used = (total - free) / 1024**3
-    total_gb = total / 1024**3
-    return f"{used:.2f}/{total_gb:.2f} GB"
 
-def get_vram_used() -> float:
+def get_vram() -> float:
     free, total = torch.cuda.mem_get_info()
     return (total - free) / 1024**3
 
-def benchmark_peft_scale(hf_id: str, batch_sizes, seq_lens, num_steps=5):
-    """Test PEFT across batch/seq combinations, returns { (bs,seq): {time, vram} }."""
+
+def benchmark_peft(model_info: dict, batch_sizes: list[int], seq_lens: list[int], num_steps: int = 5) -> dict:
     from transformers import AutoModelForCausalLM
     from peft import get_peft_model, LoraConfig
 
+    hf_id, name = model_info["hf_id"], model_info["name"]
     results = {}
     for bs in batch_sizes:
         for seq in seq_lens:
             torch.cuda.empty_cache()
             gc.collect()
-            print(f"\n  PEFT bs={bs} seq={seq}...", end=" ", flush=True)
-
+            print(f"  {name} PEFT bs={bs} seq={seq}...", end=" ", flush=True)
             try:
                 model = AutoModelForCausalLM.from_pretrained(
-                    hf_id, torch_dtype=torch.float16, device_map="cuda"
+                    hf_id, torch_dtype=torch.float16, device_map="cuda",
                 )
                 model.gradient_checkpointing_enable()
                 peft_config = LoraConfig(
                     r=16, lora_alpha=32,
                     target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
                                     "gate_proj", "up_proj", "down_proj"],
-                    task_type="CAUSAL_LM"
+                    task_type="CAUSAL_LM",
                 )
                 model = get_peft_model(model, peft_config)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
                 input_ids = torch.randint(0, 100, (bs, seq)).cuda()
 
-                vram_before = get_vram_used()
-                print(f"(model={vram_before:.1f}GB", end=" ", flush=True)
                 model(input_ids, labels=input_ids).loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
                 torch.cuda.synchronize()
-                vram_after_warmup = get_vram_used()
+                vram = get_vram()
 
-                step_times = []
-                for step in range(num_steps):
+                times = []
+                for _ in range(num_steps):
                     t0 = time.perf_counter()
                     model(input_ids, labels=input_ids).loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
                     torch.cuda.synchronize()
-                    step_times.append((time.perf_counter() - t0) * 1000)
-                vram_peak = get_vram_used()
+                    times.append((time.perf_counter() - t0) * 1000)
 
-                del model, optimizer
-                elapsed = sum(step_times) / num_steps
-                results[(bs, seq)] = {
-                    "time_ms": elapsed,
-                    "vram_gb": max(vram_after_warmup, vram_peak),
-                }
-                times_str = " ".join(f"{t:.0f}" for t in step_times)
-                print(f"warmup={vram_after_warmup:.1f}GB peak={vram_peak:.1f}GB avg={elapsed:.0f}ms steps=[{times_str}])")
+                avg = sum(times) / len(times)
+                results[(bs, seq)] = {"time_ms": avg, "vram_gb": vram}
+                print(f"OK  — {avg:.0f}ms, {vram:.1f}GB")
             except torch.cuda.OutOfMemoryError:
-                results[(bs, seq)] = {"time_ms": float('inf'), "vram_gb": float('inf')}
+                results[(bs, seq)] = {"time_ms": float("inf"), "vram_gb": float("inf")}
                 print("OOM")
-                torch.cuda.empty_cache()
             except Exception as e:
-                results[(bs, seq)] = {"time_ms": float('inf'), "vram_gb": float('inf')}
-                print(f"ERR: {e}")
-
+                results[(bs, seq)] = {"time_ms": float("inf"), "vram_gb": float("inf")}
+                print(f"ERR — {e}")
             finally:
-                try: del model, optimizer, input_ids
-                except: pass
+                try:
+                    del model, optimizer, input_ids
+                except Exception:
+                    pass
                 gc.collect()
                 torch.cuda.empty_cache()
-
     return results
 
 
-def benchmark_lema_scale(hf_id: str, batch_sizes, seq_lens, num_steps=5):
-    """Test LEMA across batch/seq combinations."""
-    from lema import LemaConfig, LemaModel, MemoryStrategy
-
+def benchmark_lema(model_info: dict, batch_sizes: list[int], seq_lens: list[int], num_steps: int = 5) -> dict:
+    hf_id, name = model_info["hf_id"], model_info["name"]
     results = {}
     for bs in batch_sizes:
         for seq in seq_lens:
             torch.cuda.empty_cache()
             gc.collect()
-            print(f"\n  LEMA bs={bs} seq={seq}...", end=" ", flush=True)
-
-            model = None
-            trainer = None
-            optimizer = None
+            print(f"  {name} LEMA bs={bs} seq={seq}...", end=" ", flush=True)
             try:
                 config = LemaConfig(
                     model_name_or_path=hf_id,
-                    device="cuda",
                     strategy=MemoryStrategy.STREAMING,
                     lora_rank=16,
                     gradient_checkpointing=True,
+                    prefetch_distance=2,
                 )
                 model = LemaModel(config)
                 model.initialize_lora()
                 optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=1e-4)
                 trainer = model.get_trainer(optimizer)
 
-                input_ids = torch.randint(0, 100, (bs, seq)).cuda()
-                labels = input_ids.clone()
-
-                # Warmup + VRAM measurement
-                vram_before = get_vram_used()
-                trainer.train_step(input_ids, labels=labels)
+                input_ids = torch.randint(0, 1000, (bs, seq)).cuda()
+                trainer.train_step(input_ids, labels=input_ids)
                 torch.cuda.synchronize()
-                vram_after = get_vram_used()
+                vram = get_vram()
 
-                step_times = []
-                for step in range(num_steps):
+                times = []
+                for _ in range(num_steps):
                     t0 = time.perf_counter()
-                    trainer.train_step(input_ids, labels=labels)
+                    trainer.train_step(input_ids, labels=input_ids)
                     torch.cuda.synchronize()
-                    step_times.append((time.perf_counter() - t0) * 1000)
-                elapsed = sum(step_times) / num_steps
+                    times.append((time.perf_counter() - t0) * 1000)
 
-                results[(bs, seq)] = {
-                    "time_ms": elapsed,
-                    "vram_gb": vram_after,
-                }
-                times_str = " ".join(f"{t:.0f}" for t in step_times)
-                print(f"OK (avg={elapsed:.0f}ms steps=[{times_str}], vram={vram_after:.1f}GB)")
+                avg = sum(times) / len(times)
+                results[(bs, seq)] = {"time_ms": avg, "vram_gb": vram}
+                print(f"OK  — {avg:.0f}ms, {vram:.1f}GB")
             except torch.cuda.OutOfMemoryError:
-                results[(bs, seq)] = {"time_ms": float('inf'), "vram_gb": float('inf')}
+                results[(bs, seq)] = {"time_ms": float("inf"), "vram_gb": float("inf")}
                 print("OOM")
-                torch.cuda.empty_cache()
             except Exception as e:
-                results[(bs, seq)] = {"time_ms": float('inf'), "vram_gb": float('inf')}
-                print(f"ERR: {e}")
-                import traceback; traceback.print_exc()
-
+                results[(bs, seq)] = {"time_ms": float("inf"), "vram_gb": float("inf")}
+                print(f"ERR — {e}")
             finally:
-                try: del model
-                except: pass
-                try: del trainer
-                except: pass
-                try: del optimizer
-                except: pass
-                try: del input_ids
-                except: pass
-                try: del labels
-                except: pass
-                try: del config
-                except: pass
+                try:
+                    del model, trainer, optimizer, input_ids
+                except Exception:
+                    pass
                 gc.collect()
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
     return results
 
 
-def run_benchmark_for_model(hf_id: str, label: str, batch_sizes, seq_lens):
-    """Run PEFT + LEMA scaling for a given model and print results."""
-    print(f"\n{'=' * 70}")
-    print(f"LEMA vs PEFT — Scaling Benchmark ({label})")
-    print(f"{'=' * 70}")
-    
-    # PEFT scaling
-    print(f"\n[PEFT] Scaling ({label})")
-    print("-" * 60)
-    peft = benchmark_peft_scale(hf_id, batch_sizes, seq_lens)
-
-    # LEMA scaling
-    print(f"\n[LEMA] Scaling ({label})")
-    print("-" * 60)
-    lema = benchmark_lema_scale(hf_id, batch_sizes, seq_lens)
-
-    # Results table
-    print(f"\n{'=' * 70}")
-    print(f"RESULTS: {label}")
-    print(f"{'=' * 70}")
-
-    header = f"{'Seq':>6} | {'Batch':>5} | {'PEFT ms':>8} | {'PEFT VRAM':>10} | {'LEMA ms':>8} | {'LEMA VRAM':>10} | {'Ratio':>8}"
+def print_results(name: str, peft: dict, lema: dict, batch_sizes: list[int], seq_lens: list[int]):
+    print()
+    print("=" * 75)
+    print(f"RESULTS: {name}")
+    print("=" * 75)
+    header = f"{'Seq':>6} | {'Batch':>6} | {'PEFT ms':>8} | {'PEFT VRAM':>9} | {'LEMA ms':>8} | {'LEMA VRAM':>9} | {'Status':>8}"
     print(header)
-    print("-" * len(header))
-
+    print("-" * 75)
     for seq in seq_lens:
         for bs in batch_sizes:
-            p = peft.get((bs, seq), {})
-            l = lema.get((bs, seq), {})
-            p_time = p.get("time_ms", float('inf'))
-            l_time = l.get("time_ms", float('inf'))
-            p_vram = p.get("vram_gb", float('inf'))
-            l_vram = l.get("vram_gb", float('inf'))
-
-            p_str = f"{p_time:.0f}" if p_time != float('inf') else " OOM"
-            l_str = f"{l_time:.0f}" if l_time != float('inf') else " OOM"
-            pv_str = f"{p_vram:.2f}" if p_vram != float('inf') else " OOM"
-            lv_str = f"{l_vram:.2f}" if l_vram != float('inf') else " OK!"
-
-            ratio = ""
-            if p_time != float('inf') and l_time != float('inf') and p_time > 0:
-                r = l_time / p_time
-                ratio = f"{r:.1f}x"
-            elif p_time == float('inf') and l_time != float('inf'):
-                ratio = "LEMA OK"
-            elif l_time == float('inf') and p_time != float('inf'):
-                ratio = "PEFT OK"
-
-            print(f"{seq:>6} | {bs:>5} | {p_str:>8} | {pv_str:>10} | {l_str:>8} | {lv_str:>10} | {ratio:>8}")
-    return peft, lema
+            p = peft.get((bs, seq), {"time_ms": float("inf"), "vram_gb": float("inf")})
+            l = lema.get((bs, seq), {"time_ms": float("inf"), "vram_gb": float("inf")})
+            pt = f"{p['time_ms']:.0f}" if p['time_ms'] != float("inf") else "  OOM"
+            pv = f"{p['vram_gb']:.1f}" if p['vram_gb'] != float("inf") else "  OOM"
+            lt = f"{l['time_ms']:.0f}" if l['time_ms'] != float("inf") else "  OOM"
+            lv = f"{l['vram_gb']:.1f}" if l['vram_gb'] != float("inf") else "  OOM"
+            status = "Both OK" if p['time_ms'] != float("inf") and l['time_ms'] != float("inf") else \
+                     "LEMA OK" if l['time_ms'] != float("inf") else \
+                     "PEFT OK" if p['time_ms'] != float("inf") else \
+                     "Both OOM"
+            print(f"{seq:>6} | {bs:>6} | {pt:>8} | {pv:>9} | {lt:>8} | {lv:>9} | {status:>8}")
+    print("=" * 75)
 
 
-def run_scaling_benchmark():
-    """Run scaling benchmarks for TinyLlama and Llama-7B."""
-    print("=" * 70)
+def main():
+    models = [
+        {"name": "TinyLlama 1.1B", "hf_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"},
+        {"name": "Llama-2 7B",     "hf_id": "NousResearch/Llama-2-7b-hf"},
+    ]
+    batch_sizes = [1, 2, 4, 8]
+    seq_lens = [128, 256, 512]
+
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    _, total = torch.cuda.mem_get_info()
+    print("=" * 75)
     print("LEMA vs PEFT — Scaling Benchmarks")
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    print("=" * 70)
+    print(f"GPU: {torch.cuda.get_device_name(0)}, Total VRAM: {total / 1024**3:.1f} GB")
+    print(f"Testing: batch={batch_sizes}, seq={seq_lens}")
+    print("=" * 75)
 
-    # TinyLlama — fits in VRAM for both, shows overhead
-    run_benchmark_for_model(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "TinyLlama 1.1B",
-        batch_sizes=[1, 2, 4, 8],
-        seq_lens=[128, 256, 512],
-    )
+    for model_info in models:
+        print(f"\n{'=' * 75}")
+        print(f"Scaling: {model_info['name']}")
+        print(f"{'=' * 75}")
 
-    # Llama-7B — larger than VRAM, shows LEMA's headroom advantage
-    run_benchmark_for_model(
-        "NousResearch/Llama-2-7b-hf",
-        "Llama-2 7B",
-        batch_sizes=[1, 2, 4, 8],
-        seq_lens=[128, 256, 512],
-    )
+        print(f"\n[PEFT]")
+        peft = benchmark_peft(model_info, batch_sizes, seq_lens)
 
-    print("\n" + "=" * 70)
-    print("Scaling Benchmark Complete")
-    print("LEMA advantage: Runs at sizes PEFT cannot (OOM)")
-    print("=" * 70)
+        print(f"\n[LEMA]")
+        lema = benchmark_lema(model_info, batch_sizes, seq_lens)
+
+        print_results(model_info["name"], peft, lema, batch_sizes, seq_lens)
 
 
 if __name__ == "__main__":
-    run_scaling_benchmark()
+    main()

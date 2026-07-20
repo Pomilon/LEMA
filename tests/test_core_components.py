@@ -1,8 +1,8 @@
 import pytest
 import torch
 import torch.nn as nn
-from lema.core.gbi import GlobalBinaryIndex
-from lema.core.lora import LoRAManager, LoRAWrapper
+from lema._gbi import GlobalBinaryIndex
+from lema._lora import LoRAManager, LoRAWrapper
 
 def test_gbi_loading(tmp_path):
     # Create a dummy safetensors file

@@ -1,8 +1,14 @@
 import pytest
 import torch
-from transformers import Lfm2MoeConfig
-from lema.models import get_adapter
+from lema.adapters import get_adapter
 
+try:
+    from transformers import Lfm2MoeConfig
+    HAS_LFM = True
+except ImportError:
+    HAS_LFM = False
+
+@pytest.mark.skipif(not HAS_LFM, reason="Lfm2MoeConfig not available in this transformers version")
 def test_lfm2_adapter_init():
     config = Lfm2MoeConfig(
         vocab_size=1000, hidden_size=64, intermediate_size=128,
@@ -22,7 +28,8 @@ def test_lfm2_adapter_init():
 
     param_names = adapter.get_param_names_for_layer(2)
     assert "model.layers.1.self_attn.q_proj.weight" in param_names
-    assert "model.layers.1.feed_forward.experts.gate_up_proj" in param_names
+    assert "model.layers.1.feed_forward.gate.weight" in param_names
+    assert "model.layers.1.feed_forward.experts.0.w1.weight" in param_names
 
     module = adapter.construct_layer_module(1)
     assert module is not None

@@ -1,7 +1,7 @@
 import pytest
 import torch
 from transformers import MistralConfig, MixtralConfig
-from lema.models import get_adapter
+from lema.adapters import get_adapter
 
 def test_mistral_adapter_init():
     config = MistralConfig(num_hidden_layers=2, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2)

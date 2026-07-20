@@ -6,12 +6,12 @@ from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from safetensors.torch import save_file
 
 # LEMA Imports
-from src.lema.core.gbi import GlobalBinaryIndex
-from src.lema.models.llama import LlamaAdapter
-from src.lema.models.gpt2 import GPT2Adapter
-from src.lema.engine.trainer import LemaTrainer
-from src.lema.core.lora import LoRAManager
-from src.lema.config import LemaConfig, MemoryStrategy
+from lema.gbi import GlobalBinaryIndex
+from lema.adapters.llama import LlamaAdapter
+from lema.adapters.gpt2 import GPT2Adapter
+from lema.trainer import LemaTrainer
+from lema.lora import LoRAManager
+from lema import LemaConfig, MemoryStrategy
 
 print(f"Using Transformers version: {transformers.__version__}")
 
@@ -147,7 +147,6 @@ def run_test(model_info):
             model_name_or_path=model_info['path'],
             device="cuda",
             strategy=MemoryStrategy.STREAMING,
-            learning_rate=1e-4
         )
         
         # LoRA - ALL LINEAR LAYERS
@@ -171,7 +170,7 @@ def run_test(model_info):
         
         trainable_params = lora_manager.get_trainable_parameters()
         print(f"Trainable Tensors: {len(trainable_params)}")
-        optimizer = torch.optim.AdamW(trainable_params, lr=lema_config.learning_rate)
+        optimizer = torch.optim.AdamW(trainable_params, lr=1e-4)
         
         trainer = LemaTrainer(
             config=lema_config,

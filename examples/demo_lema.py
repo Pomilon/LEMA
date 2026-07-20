@@ -1,7 +1,7 @@
 import torch
 import os
 from lema import LemaConfig, LemaModel, MemoryStrategy
-from lema.utils.model_utils import break_shared_weights
+from lema._utils.model_utils import break_shared_weights
 from transformers import GPT2Config, GPT2LMHeadModel
 from safetensors.torch import save_file
 

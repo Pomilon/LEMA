@@ -2,9 +2,7 @@ import torch
 import torch.optim as optim
 from transformers import GPT2Config, GPT2LMHeadModel
 from safetensors.torch import save_file
-from lema.core.model import LemaModel
-from lema.engine.trainer import LemaTrainer
-from lema.config import LemaConfig, MemoryStrategy
+from lema import LemaModel, LemaTrainer, LemaConfig, MemoryStrategy
 import os
 import shutil
 

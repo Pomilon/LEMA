@@ -8,11 +8,11 @@ from transformers import GPT2Config, GPT2LMHeadModel
 # Add src to path if not installed
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from lema.core.gbi import GlobalBinaryIndex
-from lema.models.gpt2 import GPT2Adapter
-from lema.engine.trainer import LemaTrainer
-from lema.core.lora import LoRAManager
-from lema.config import LemaConfig, MemoryStrategy
+from lema.gbi import GlobalBinaryIndex
+from lema.adapters.gpt2 import GPT2Adapter
+from lema.trainer import LemaTrainer
+from lema.lora import LoRAManager
+from lema import LemaConfig, MemoryStrategy
 
 def get_peak_rss_mb():
     # ru_maxrss is in kilobytes on Linux

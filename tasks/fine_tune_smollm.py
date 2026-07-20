@@ -25,7 +25,6 @@ def fine_tune_smollm():
         gbi_path=MODEL_PATH,
         device="cuda",
         strategy=MemoryStrategy.STREAMING,
-        learning_rate=5e-5,
         lora_rank=16
     )
     

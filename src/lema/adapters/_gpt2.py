@@ -1,22 +1,27 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, GPT2Config
-from typing import List, Dict, Any, Optional
+from typing import Any
 
-from .base import LemaModelAdapter
+from ._base import LemaModelAdapter
+
 
 class GPT2Adapter(LemaModelAdapter):
-    def __init__(self, config: Dict[str, Any]):
+    MODEL_TYPE = "gpt2"
+    MAX_POOL_SIZE = 3
+
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.hf_config = GPT2Config(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
             self.hf_config._attn_implementation = config.get("attn_implementation", "eager")
         # Permanent module cache: created once, reused across all steps
-        self.module_pool: List[nn.Module] = []
-        self._max_pool_size = 3
-        self.param_mappings: Dict[int, List[tuple]] = {}
+        self.module_pool: list[nn.Module] = []
+        self.param_mappings: dict[int, list[tuple]] = {}
 
-    def get_layer_metadata(self) -> List[Dict[str, Any]]:
+    def get_layer_metadata(self) -> list[dict[str, Any]]:
         layers = []
         layers.append({'id': 0, 'name': 'embeddings', 'type': 'embedding'})
         for i in range(self.hf_config.n_layer):
@@ -24,7 +29,7 @@ class GPT2Adapter(LemaModelAdapter):
         layers.append({'id': self.hf_config.n_layer + 1, 'name': 'head', 'type': 'head'})
         return layers
 
-    def get_param_names_for_layer(self, layer_id: int) -> List[str]:
+    def get_param_names_for_layer(self, layer_id: int) -> list[str]:
         if layer_id == 0:
             return ['transformer.wte.weight', 'transformer.wpe.weight']
         elif 1 <= layer_id <= self.hf_config.n_layer:
@@ -42,7 +47,7 @@ class GPT2Adapter(LemaModelAdapter):
             return ['transformer.ln_f.weight', 'transformer.ln_f.bias', 'lm_head.weight']
         return []
 
-    def construct_layer_module(self, layer_id: int, flat_buffer: Optional[torch.Tensor] = None, lora_manager: Optional[Any] = None) -> nn.Module:
+    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         module = None
@@ -81,7 +86,7 @@ class GPT2Adapter(LemaModelAdapter):
 
         return module
 
-    def _create_mapping(self, layer_id: int, module: nn.Module) -> List[tuple]:
+    def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         idx = layer_id - 1
         module_params = dict(module.named_parameters())
@@ -105,7 +110,7 @@ class GPT2Adapter(LemaModelAdapter):
         return mapping
 
     def release_layer_module(self, module: nn.Module):
-        pass  # Permanent modules — keep alive
+        self.param_mappings.pop(id(module), None)
 
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
@@ -117,6 +122,7 @@ class GPT2Adapter(LemaModelAdapter):
     def hidden_size(self) -> int:
         return self.hf_config.n_embd
 
+
 class GPT2EmbeddingsLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -125,6 +131,7 @@ class GPT2EmbeddingsLayer(nn.Module):
     def forward(self, input_ids):
         position_ids = torch.arange(0, input_ids.size(-1), dtype=torch.long, device=input_ids.device).unsqueeze(0)
         return self.wte(input_ids) + self.wpe(position_ids)
+
 
 class GPT2HeadLayer(nn.Module):
     def __init__(self, config):

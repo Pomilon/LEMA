@@ -27,7 +27,6 @@ def fine_tune_llama_7b():
         gbi_path=MODEL_PATH,
         device="cuda",
         strategy=MemoryStrategy.STREAMING,
-        learning_rate=5e-5,
         lora_rank=16,
         gradient_checkpointing=True
     )

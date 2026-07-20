@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 import os
-from typing import Any, Optional, List, Union, Dict
+from typing import Any
 from tqdm import tqdm
 
-from ..core.memory import TripleBufferManager
-from ..models.base import LemaModelAdapter
-from ..config import LemaConfig, MemoryStrategy
-from ..utils.logger import logger
+from ._memory import TripleBufferManager
+from .adapters._base import LemaModelAdapter
+from ._config import LemaConfig, MemoryStrategy
+from ._utils._logger import logger
+
+PHASE_PREFETCH = 1
+PHASE_FORWARD = 2
+PHASE_BACKWARD = 3
 
 class LemaTrainer:
     """
@@ -19,8 +25,8 @@ class LemaTrainer:
                  model_adapter: LemaModelAdapter, 
                  gbi: Any, 
                  lora_manager: Any = None, 
-                 optimizer: Optional[torch.optim.Optimizer] = None,
-                 memory_manager: Optional[TripleBufferManager] = None):
+                 optimizer: torch.optim.Optimizer | None = None,
+                 memory_manager: TripleBufferManager | None = None):
         
         self.config = config
         self.adapter = model_adapter
@@ -40,6 +46,11 @@ class LemaTrainer:
         self.global_step = 0
         self.accumulation_step = 0
 
+    def close(self):
+        """Releases the memory manager."""
+        if hasattr(self, "memory") and self.memory is not None:
+            self.memory.close()
+
     def save_checkpoint(self, save_directory: str):
         """Saves the model state (config + LoRA) and optionally optimizer state."""
         os.makedirs(save_directory, exist_ok=True)
@@ -51,7 +62,7 @@ class LemaTrainer:
             torch.save(self.optimizer.state_dict(), os.path.join(save_directory, "optimizer.bin"))
         logger.info(f"LEMA: Checkpoint saved to {save_directory}")
 
-    def train_step(self, inputs: Any, labels: Optional[torch.Tensor] = None):
+    def train_step(self, inputs: Any, labels: torch.Tensor | None = None):
         """
         Executes one training step with the sliding-window pipeline.
         Forward: no_grad (saves inputs, no autograd graph). 
@@ -59,16 +70,16 @@ class LemaTrainer:
         Pool recycles 2-3 modules — VRAM stays constant regardless of model size.
         """
         dist = self.config.prefetch_distance
-        boundary_activations: List[torch.Tensor] = []
+        boundary_activations: list[torch.Tensor] = []
 
-        # --- PHASE 1: INITIAL PREFETCH ---
+        # Phase 1: Initial Prefetch
         for j in range(min(dist, len(self.layers))):
             self.memory.prefetch_to_ram(self.layers[j]['id'], slot=j % 2)
         self.memory.async_transfer_to_vram(self.layers[0]['id'], vram_slot=0, ram_slot=0)
 
         hidden_states = inputs
 
-        # --- PHASE 2: FORWARD PASS (no_grad — no autograd graph saved) ---
+        # Phase 2: Forward Pass
         with torch.no_grad():
             for i, layer_meta in enumerate(self.layers):
                 slot = i % 2
@@ -97,7 +108,7 @@ class LemaTrainer:
         logits = hidden_states
         loss_val = None
 
-        # --- PHASE 3: BACKWARD PASS (re-forward with grad) ---
+        # Phase 3: Backward Pass
         if not torch.is_grad_enabled():
             return logits, None
 
@@ -148,6 +159,7 @@ class LemaTrainer:
 
         self.accumulation_step += 1
         if self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
+            torch.nn.utils.clip_grad_norm_(self.lora_manager.get_trainable_parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
         self.global_step += 1

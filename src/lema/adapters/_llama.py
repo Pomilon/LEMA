@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaConfig, LlamaRotaryEmbedding
-from typing import List, Dict, Any, Optional
+from typing import Any
 
-from .base import LemaModelAdapter
+from ._base import LemaModelAdapter
+
 
 class LlamaAdapter(LemaModelAdapter):
-    def __init__(self, config: Dict[str, Any]):
+    MODEL_TYPE = "llama"
+    MAX_POOL_SIZE = 3
+
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.hf_config = LlamaConfig(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
@@ -21,11 +27,10 @@ class LlamaAdapter(LemaModelAdapter):
                 max_position_embeddings=self.hf_config.max_position_embeddings
             )
 
-        self.module_pool: List[nn.Module] = []  # Sliding window pool
-        self._max_pool_size = 3  # One emb + one decoder + one head
-        self.param_mappings: Dict[int, List[tuple]] = {}
+        self.module_pool: list[nn.Module] = []  # Sliding window pool
+        self.param_mappings: dict[int, list[tuple]] = {}
 
-    def get_layer_metadata(self) -> List[Dict[str, Any]]:
+    def get_layer_metadata(self) -> list[dict[str, Any]]:
         layers = []
         layers.append({'id': 0, 'name': 'embeddings', 'type': 'embedding'})
         for i in range(self.hf_config.num_hidden_layers):
@@ -33,7 +38,7 @@ class LlamaAdapter(LemaModelAdapter):
         layers.append({'id': self.hf_config.num_hidden_layers + 1, 'name': 'head', 'type': 'head'})
         return layers
 
-    def get_param_names_for_layer(self, layer_id: int) -> List[str]:
+    def get_param_names_for_layer(self, layer_id: int) -> list[str]:
         if layer_id == 0:
             return ['model.embed_tokens.weight']
         elif 1 <= layer_id <= self.hf_config.num_hidden_layers:
@@ -51,7 +56,7 @@ class LlamaAdapter(LemaModelAdapter):
             return ['model.norm.weight', 'lm_head.weight']
         return []
 
-    def construct_layer_module(self, layer_id: int, flat_buffer: Optional[torch.Tensor] = None, lora_manager: Optional[Any] = None) -> nn.Module:
+    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         # Pop matching module from sliding-window pool, or create on CPU
@@ -96,7 +101,7 @@ class LlamaAdapter(LemaModelAdapter):
 
         return module
 
-    def _create_mapping(self, layer_id: int, module: nn.Module) -> List[tuple]:
+    def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         idx = layer_id - 1
         module_params = dict(module.named_parameters())
@@ -133,7 +138,7 @@ class LlamaAdapter(LemaModelAdapter):
 
     def release_layer_module(self, module: nn.Module):
         """Return module to sliding-window pool. Discarded modules free their GPU memory."""
-        if len(self.module_pool) < self._max_pool_size:
+        if len(self.module_pool) < self.MAX_POOL_SIZE:
             self.module_pool.append(module)
         else:
             for p in module.parameters():
@@ -158,6 +163,7 @@ class LlamaAdapter(LemaModelAdapter):
             mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
             mask = torch.triu(mask, diagonal=1)
             self._cache_mask = mask.view(1, 1, seq_len, seq_len).expand(batch_size, 1, seq_len, seq_len)
+            self._cache_rope = None
             position_ids = self._cache_pos
             attention_mask = self._cache_mask
         else:
@@ -165,7 +171,7 @@ class LlamaAdapter(LemaModelAdapter):
             attention_mask = self._cache_mask
 
         # Compute RoPE (once — same for all layers)
-        if not hasattr(self, "_cache_rope") or self._cache_seq != seq_len:
+        if not hasattr(self, "_cache_rope") or self._cache_rope is None:
             attn = layer_module.self_attn
             try:
                 if hasattr(attn, "rotary_emb") and attn.rotary_emb is not None:
@@ -208,11 +214,13 @@ class LlamaAdapter(LemaModelAdapter):
     def hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
+
 class LlamaEmbeddingsLayer(nn.Module):
     def __init__(self, config, weights):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
     def forward(self, x): return self.embed_tokens(x)
+
 
 class LlamaHeadLayer(nn.Module):
     def __init__(self, config, weights):

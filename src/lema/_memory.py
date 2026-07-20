@@ -1,16 +1,18 @@
+from __future__ import annotations
+
 import torch
 import threading
 import gc
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional, List, Tuple, Any
 from enum import Enum
+from typing import Any
 
-from ..config import LemaConfig, MemoryStrategy
-from ..utils.logger import logger
+from ._config import LemaConfig, MemoryStrategy
+from ._utils._logger import logger
 
 try:
-    from ..csrc import _lema_cpp
+    from ._csrc import _lema_cpp
     HAS_CPP_BACKEND = True
 except ImportError:
     HAS_CPP_BACKEND = False
@@ -78,15 +80,31 @@ class TripleBufferManager:
         ]
 
         # Per-instance CUDA event tracking (avoids full stream.synchronize())
-        self._transfer_event_ids: Dict[int, int] = {}
+        self._transfer_event_ids: dict[int, int] = {}
 
         # 4. Initialize C++ Memory Manager
-        self.cpp_mgr = None
-        if HAS_CPP_BACKEND and self.is_cuda:
+        backend = self.config.backend
+        if backend == "auto":
+            if not HAS_CPP_BACKEND and self.is_cuda:
+                logger.warning("C++ backend not available. Use backend='python' to silence this warning.")
+            self.use_cpp = HAS_CPP_BACKEND and self.is_cuda
+        elif backend == "cpp":
+            if not HAS_CPP_BACKEND:
+                raise RuntimeError("C++ backend requested but not available. Install with CUDA extension or use backend='python'.")
+            if not self.is_cuda:
+                raise RuntimeError("C++ backend requires CUDA device.")
+            self.use_cpp = True
+        elif backend == "python":
+            self.use_cpp = False
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Choose 'auto', 'cpp', or 'python'.")
+
+        if self.use_cpp:
             self.cpp_mgr = _lema_cpp.LemaMemoryManager(len(self.layers_meta) + 2, self.max_params)
             for i, buf in enumerate(self.vram_flat_buffers):
                 self.cpp_mgr.register_vram_slot(i, buf)
         else:
+            self.cpp_mgr = None
             self.transfer_streams = [torch.cuda.Stream() for _ in range(2)] if self.is_cuda else None
 
         # 5. Python ThreadPoolExecutor for background prefetching
@@ -96,7 +114,7 @@ class TripleBufferManager:
             max_workers=num_prefetch_workers,
             thread_name_prefix="lema_prefetch"
         )
-        self._prefetch_futures: Dict[int, Any] = {}
+        self._prefetch_futures: dict[int, Any] = {}
 
         # 6. RAM Strategy Logic
         self.ram_buffers = {}
@@ -115,38 +133,30 @@ class TripleBufferManager:
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[1000 + i] = buf
-            if self.cpp_mgr:
+            if self.use_cpp:
                 self.cpp_mgr.register_ram_buffer(1000 + i, buf)
         self.ram_layer_ids = [-1, -1]
 
-    def _calculate_total_params(self) -> int:
+    def _sum_layer_params(self, layer_id: int) -> int:
         total = 0
-        for layer in self.layers_meta:
-            names = self.adapter.get_param_names_for_layer(layer['id'])
-            for name in names:
+        for name in self.adapter.get_param_names_for_layer(layer_id):
+            try:
                 shape = self.gbi.get_tensor_shape(name)
-                if shape is not None:
-                    total += torch.Size(shape).numel()
+            except Exception:
+                continue
+            if shape is not None:
+                total += torch.Size(shape).numel()
         return total
 
+    def _calculate_total_params(self) -> int:
+        return sum(self._sum_layer_params(l['id']) for l in self.layers_meta)
+
     def _calculate_max_params(self) -> int:
-        max_p = 0
-        for layer in self.layers_meta:
-            names = self.adapter.get_param_names_for_layer(layer['id'])
-            current_p = 0
-            for name in names:
-                try:
-                    shape = self.gbi.get_tensor_shape(name)
-                except Exception as e:
-                    logger.warning(f"Error getting shape for '{name}': {e}")
-                    continue
-                if shape is None:
-                    logger.warning(f"Tensor '{name}' not found in GBI, skipping")
-                    continue
-                current_p += torch.Size(shape).numel()
-            max_p = max(max_p, current_p)
+        max_p = max(self._sum_layer_params(l['id']) for l in self.layers_meta)
         if max_p == 0:
-            raise RuntimeError(f"No valid tensor shapes found. Available GBI keys: {list(self.gbi.get_keys())[:20]}...")
+            raise RuntimeError(
+                f"No valid tensor shapes found. Available GBI keys: {list(self.gbi.get_keys())[:20]}..."
+            )
         return max_p
 
     def _initialize_ram_cache(self):
@@ -179,7 +189,7 @@ class TripleBufferManager:
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[1000 + i] = buf
-            if self.cpp_mgr:
+            if self.use_cpp:
                 self.cpp_mgr.register_ram_buffer(1000 + i, buf)
         self.ram_layer_ids = [-1, -1]
 
@@ -198,7 +208,7 @@ class TripleBufferManager:
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[layer_id] = buf
-            if self.cpp_mgr:
+            if self.use_cpp:
                 self.cpp_mgr.register_ram_buffer(layer_id, buf)
         else:
             buf = self.ram_buffers[1000 + slot]
@@ -260,7 +270,7 @@ class TripleBufferManager:
                 future.result()
             del self._prefetch_futures[slot]
 
-    def async_transfer_to_vram(self, layer_id: int, vram_slot: int, ram_slot: Optional[int] = None):
+    def async_transfer_to_vram(self, layer_id: int, vram_slot: int, ram_slot: int | None = None):
         """Stage 2: Async transfer from RAM to GPU VRAM.
 
         Uses C++ backend with CUDA events when available (avoids stream.synchronize()).
@@ -268,7 +278,7 @@ class TripleBufferManager:
         """
         is_resident = (layer_id in self.ram_buffers and layer_id < 1000)
 
-        if self.cpp_mgr:
+        if self.use_cpp:
             cpp_layer_id = layer_id if is_resident else (1000 + (ram_slot or 0))
             event_id = self.cpp_mgr.async_transfer_to_vram(cpp_layer_id, vram_slot)
             self._transfer_event_ids[vram_slot] = event_id
@@ -288,7 +298,7 @@ class TripleBufferManager:
         With C++: uses cudaEventSynchronize (precise, per-transfer).
         Without C++: uses stream.synchronize() (coarser, per-stream).
         """
-        if self.cpp_mgr:
+        if self.use_cpp:
             event_id = self._transfer_event_ids.pop(vram_slot, -1)
             if event_id >= 0:
                 self.cpp_mgr.wait_vram_transfer(event_id)
@@ -298,5 +308,28 @@ class TripleBufferManager:
                 self.transfer_streams[vram_slot].synchronize()
             return self.vram_flat_buffers[vram_slot]
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def close(self):
+        """Explicit cleanup. Releases GPU memory, shuts down thread pools, destroys C++ backend."""
+        if hasattr(self, "prefetch_executor"):
+            self.prefetch_executor.shutdown(wait=False)
+        if hasattr(self, "cpp_mgr") and self.cpp_mgr is not None:
+            del self.cpp_mgr
+            self.cpp_mgr = None
+        for k in list(self.ram_buffers.keys()):
+            self.ram_buffers[k] = None
+        for i in range(len(self.vram_flat_buffers)):
+            self.vram_flat_buffers[i] = torch.empty(1, device=self.device)
+        self._transfer_event_ids.clear()
+        self._prefetch_futures.clear()
+
     def clear_vram_slot(self, vram_slot: int):
-        pass
+        self.vram_flat_buffers[vram_slot] = torch.empty(
+            self.max_params, device=self.device, dtype=self.dtype
+        )
+        self._transfer_event_ids.pop(vram_slot, None)

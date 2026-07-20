@@ -16,14 +16,13 @@ import torch
 import numpy as np
 from typing import Dict, List, Optional
 
-sys.path.insert(0, "src")
-from lema.config import LemaConfig, MemoryStrategy
-from lema.core.gbi import GlobalBinaryIndex
-from lema.core.lora import LoRAManager
-from lema.engine.trainer import LemaTrainer
-from lema.utils.logger import logger
-from lema.models.gpt2 import GPT2Adapter
-from lema.core.memory import TripleBufferManager, HAS_CPP_BACKEND
+from lema import LemaConfig, MemoryStrategy
+from lema._gbi import GlobalBinaryIndex
+from lema._lora import LoRAManager
+from lema._trainer import LemaTrainer
+from lema._utils._logger import logger
+from lema.adapters._gpt2 import GPT2Adapter
+from lema._memory import TripleBufferManager, HAS_CPP_BACKEND
 
 
 def benchmark_packing(adapter, gbi, num_warmup=5, num_iters=30):
@@ -73,7 +72,7 @@ def benchmark_packing(adapter, gbi, num_warmup=5, num_iters=30):
 
     # --- C++ path ---
     if HAS_CPP_BACKEND:
-        from lema.csrc import _lema_cpp
+        from lema._csrc import _lema_cpp
         print(f"  C++   packing: running {num_warmup + num_iters} iters...", end=" ", flush=True)
         # Create C++ manager once (amortize construction overhead)
         cpp_mgr = _lema_cpp.LemaMemoryManager(len(layers) + 2, max_params)
@@ -149,7 +148,7 @@ def benchmark_transfer(max_params, dtype, num_warmup=10, num_iters=100):
 
     # --- C++ path ---
     if HAS_CPP_BACKEND:
-        from lema.csrc import _lema_cpp
+        from lema._csrc import _lema_cpp
         cpp_mgr = _lema_cpp.LemaMemoryManager(2, max_params)
         cpp_vram_buf = torch.empty(max_params, device="cuda", dtype=dtype)
         cpp_mgr.register_ram_buffer(0, ram_buf)
@@ -191,7 +190,7 @@ def benchmark_training_loop(tmp_dir, use_cpp_backend: bool):
     from safetensors.torch import save_file
 
     # Force C++ backend on/off
-    import lema.core.memory as mem_module
+    import lema._memory as mem_module
     old_status = mem_module.HAS_CPP_BACKEND
     mem_module.HAS_CPP_BACKEND = use_cpp_backend and HAS_CPP_BACKEND
 
@@ -219,7 +218,7 @@ def benchmark_training_loop(tmp_dir, use_cpp_backend: bool):
             prefetch_distance=2,
         )
 
-        from lema.core.model import LemaModel
+        from lema import LemaModel
         model = LemaModel(lema_config)
         model.initialize_lora()
         optimizer = torch.optim.SGD(model.get_trainable_parameters(), lr=0.01)

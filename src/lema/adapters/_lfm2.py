@@ -1,18 +1,28 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-from transformers.models.lfm2_moe.modeling_lfm2_moe import (
-    Lfm2MoeDecoderLayer, Lfm2MoeConfig, Lfm2MoeRotaryEmbedding, Lfm2MoeRMSNorm,
-)
+try:
+    from transformers.models.lfm2_moe.modeling_lfm2_moe import (
+        Lfm2MoeDecoderLayer, Lfm2MoeConfig, Lfm2MoeRotaryEmbedding, Lfm2MoeRMSNorm,
+    )
+except ImportError:
+    Lfm2MoeDecoderLayer = Lfm2MoeConfig = Lfm2MoeRotaryEmbedding = Lfm2MoeRMSNorm = None
+
 try:
     from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 except ImportError:
     create_causal_mask = create_recurrent_attention_mask = None
-from typing import List, Dict, Any, Optional
+from typing import Any
 
-from .base import LemaModelAdapter
+from ._base import LemaModelAdapter
+
 
 class Lfm2Adapter(LemaModelAdapter):
-    def __init__(self, config: Dict[str, Any]):
+    MODEL_TYPE = "lfm2_moe"
+    MAX_POOL_SIZE = 3
+
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.hf_config = Lfm2MoeConfig(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
@@ -20,11 +30,10 @@ class Lfm2Adapter(LemaModelAdapter):
 
         self.rotary_emb = Lfm2MoeRotaryEmbedding(self.hf_config)
 
-        self.module_pool: List[nn.Module] = []
-        self._max_pool_size = 3
-        self.param_mappings: Dict[int, List[tuple]] = {}
+        self.module_pool: list[nn.Module] = []
+        self.param_mappings: dict[int, list[tuple]] = {}
 
-    def get_layer_metadata(self) -> List[Dict[str, Any]]:
+    def get_layer_metadata(self) -> list[dict[str, Any]]:
         layers = []
         layers.append({'id': 0, 'name': 'embeddings', 'type': 'embedding'})
         for i in range(self.hf_config.num_hidden_layers):
@@ -34,7 +43,7 @@ class Lfm2Adapter(LemaModelAdapter):
         layers.append({'id': self.hf_config.num_hidden_layers + 1, 'name': 'head', 'type': 'head'})
         return layers
 
-    def _layer_param_names(self, idx: int) -> List[str]:
+    def _layer_param_names(self, idx: int) -> list[str]:
         prefix = f"model.layers.{idx}"
         names = [f"{prefix}.operator_norm.weight", f"{prefix}.ffn_norm.weight"]
 
@@ -65,7 +74,7 @@ class Lfm2Adapter(LemaModelAdapter):
                 ]
         return names
 
-    def get_param_names_for_layer(self, layer_id: int) -> List[str]:
+    def get_param_names_for_layer(self, layer_id: int) -> list[str]:
         if layer_id == 0:
             return ['model.embed_tokens.weight']
         elif 1 <= layer_id <= self.hf_config.num_hidden_layers:
@@ -77,7 +86,7 @@ class Lfm2Adapter(LemaModelAdapter):
             return names
         return []
 
-    def construct_layer_module(self, layer_id: int, flat_buffer: Optional[torch.Tensor] = None, lora_manager: Optional[Any] = None) -> nn.Module:
+    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         module = None
@@ -119,7 +128,7 @@ class Lfm2Adapter(LemaModelAdapter):
 
         return module
 
-    def _create_mapping(self, layer_id: int, module: nn.Module) -> List[tuple]:
+    def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         module_params = dict(module.named_parameters())
         mapping = []
@@ -155,7 +164,7 @@ class Lfm2Adapter(LemaModelAdapter):
         return mapping
 
     def release_layer_module(self, module: nn.Module):
-        if len(self.module_pool) < self._max_pool_size:
+        if len(self.module_pool) < self.MAX_POOL_SIZE:
             self.module_pool.append(module)
         else:
             for p in module.parameters():

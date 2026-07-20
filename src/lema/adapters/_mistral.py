@@ -1,38 +1,36 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer, MixtralRMSNorm, MixtralConfig, MixtralRotaryEmbedding
-from typing import List, Dict, Any, Optional
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralRMSNorm, MistralConfig, MistralRotaryEmbedding
+from typing import Any
 
-from .base import LemaModelAdapter
+from ._base import LemaModelAdapter
 
-class MixtralAdapter(LemaModelAdapter):
-    def __init__(self, config: Dict[str, Any]):
+
+class MistralAdapter(LemaModelAdapter):
+    MODEL_TYPE = "mistral"
+    MAX_POOL_SIZE = 3
+
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
-        self.hf_config = MixtralConfig(**config)
+        self.hf_config = MistralConfig(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
             self.hf_config._attn_implementation = config.get("attn_implementation", "eager")
 
         try:
-            self.rotary_emb = MixtralRotaryEmbedding(self.hf_config)
+            self.rotary_emb = MistralRotaryEmbedding(self.hf_config)
         except TypeError:
-            self.rotary_emb = MixtralRotaryEmbedding(
+            self.rotary_emb = MistralRotaryEmbedding(
                 self.hf_config.hidden_size // self.hf_config.num_attention_heads,
                 max_position_embeddings=self.hf_config.max_position_embeddings
             )
 
-        self.module_pool: List[nn.Module] = []
-        self._max_pool_size = 3
-        self.param_mappings: Dict[int, List[tuple]] = {}
+        self.module_pool: list[nn.Module] = []
+        self.param_mappings: dict[int, list[tuple]] = {}
 
-        # Detect Mixtral parameter naming (transformers v4 vs v5 compatibility)
-        dummy = MixtralDecoderLayer(self.hf_config, layer_idx=0)
-        self._moe_prefix = "mlp" if hasattr(dummy, "mlp") else "block_sparse_moe"
-        self._expert_params = [k for k in dict(dummy.named_parameters()).keys()
-                               if f"{self._moe_prefix}." in k]
-        del dummy
-
-    def get_layer_metadata(self) -> List[Dict[str, Any]]:
+    def get_layer_metadata(self) -> list[dict[str, Any]]:
         layers = []
         layers.append({'id': 0, 'name': 'embeddings', 'type': 'embedding'})
         for i in range(self.hf_config.num_hidden_layers):
@@ -40,47 +38,45 @@ class MixtralAdapter(LemaModelAdapter):
         layers.append({'id': self.hf_config.num_hidden_layers + 1, 'name': 'head', 'type': 'head'})
         return layers
 
-    def get_param_names_for_layer(self, layer_id: int) -> List[str]:
+    def get_param_names_for_layer(self, layer_id: int) -> list[str]:
         if layer_id == 0:
             return ['model.embed_tokens.weight']
         elif 1 <= layer_id <= self.hf_config.num_hidden_layers:
             idx = layer_id - 1
             prefix = f"model.layers.{idx}"
-            names = [
+            return [
                 f"{prefix}.input_layernorm.weight",
                 f"{prefix}.self_attn.q_proj.weight", f"{prefix}.self_attn.k_proj.weight",
                 f"{prefix}.self_attn.v_proj.weight", f"{prefix}.self_attn.o_proj.weight",
                 f"{prefix}.post_attention_layernorm.weight",
+                f"{prefix}.mlp.gate_proj.weight", f"{prefix}.mlp.up_proj.weight",
+                f"{prefix}.mlp.down_proj.weight",
             ]
-            # Add moe params matching the actual module structure
-            for mk in self._expert_params:
-                names.append(f"{prefix}.{mk}")
-            return names
         elif layer_id == self.hf_config.num_hidden_layers + 1:
             return ['model.norm.weight', 'lm_head.weight']
         return []
 
-    def construct_layer_module(self, layer_id: int, flat_buffer: Optional[torch.Tensor] = None, lora_manager: Optional[Any] = None) -> nn.Module:
+    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         module = None
         for i, m in enumerate(self.module_pool):
-            if layer_id == 0 and isinstance(m, MixtralEmbeddingsLayer):
+            if layer_id == 0 and isinstance(m, MistralEmbeddingsLayer):
                 module = self.module_pool.pop(i); break
-            elif layer_id == self.hf_config.num_hidden_layers + 1 and isinstance(m, MixtralHeadLayer):
+            elif layer_id == self.hf_config.num_hidden_layers + 1 and isinstance(m, MistralHeadLayer):
                 module = self.module_pool.pop(i); break
-            elif 1 <= layer_id <= self.hf_config.num_hidden_layers and isinstance(m, MixtralDecoderLayer):
+            elif 1 <= layer_id <= self.hf_config.num_hidden_layers and isinstance(m, MistralDecoderLayer):
                 module = self.module_pool.pop(i); break
 
         if module is None:
             dtype_str = self.config.get("dtype", "float32")
             target_dtype = getattr(torch, dtype_str) if dtype_str else torch.float32
             if layer_id == 0:
-                module = MixtralEmbeddingsLayer(self.hf_config, None)
+                module = MistralEmbeddingsLayer(self.hf_config, None)
             elif layer_id == self.hf_config.num_hidden_layers + 1:
-                module = MixtralHeadLayer(self.hf_config, None)
+                module = MistralHeadLayer(self.hf_config, None)
             else:
-                module = MixtralDecoderLayer(self.hf_config, layer_idx=0)
+                module = MistralDecoderLayer(self.hf_config, layer_idx=0)
             module.to(device=device, dtype=target_dtype)
 
             if lora_manager and 1 <= layer_id <= self.hf_config.num_hidden_layers:
@@ -102,7 +98,7 @@ class MixtralAdapter(LemaModelAdapter):
 
         return module
 
-    def _create_mapping(self, layer_id: int, module: nn.Module) -> List[tuple]:
+    def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         idx = layer_id - 1
         module_params = dict(module.named_parameters())
@@ -138,7 +134,7 @@ class MixtralAdapter(LemaModelAdapter):
         return mapping
 
     def release_layer_module(self, module: nn.Module):
-        if len(self.module_pool) < self._max_pool_size:
+        if len(self.module_pool) < self.MAX_POOL_SIZE:
             self.module_pool.append(module)
         else:
             for p in module.parameters():
@@ -149,11 +145,10 @@ class MixtralAdapter(LemaModelAdapter):
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
 
-        if isinstance(layer_module, MixtralDecoderLayer):
+        if isinstance(layer_module, MistralDecoderLayer):
             batch_size, seq_len = hidden_states.shape[:2]
             device = hidden_states.device
 
-            # Cached per-step constants (same across all layers)
             if "position_ids" in kwargs:
                 position_ids = kwargs["position_ids"]
                 attention_mask = kwargs["attention_mask"]
@@ -170,7 +165,6 @@ class MixtralAdapter(LemaModelAdapter):
                 position_ids = self._cache_pos
                 attention_mask = self._cache_mask
 
-            # Compute RoPE (once — same for all layers)
             if self._cache_rope is None:
                 attn = layer_module.self_attn
                 try:
@@ -216,7 +210,7 @@ class MixtralAdapter(LemaModelAdapter):
 
             residual = hidden_states
             hidden_states = layer_module.post_attention_layernorm(hidden_states)
-            hidden_states, _ = layer_module.block_sparse_moe(hidden_states)
+            hidden_states = layer_module.mlp(hidden_states)
             hidden_states = residual + hidden_states
 
             return hidden_states
@@ -227,15 +221,17 @@ class MixtralAdapter(LemaModelAdapter):
     def hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
-class MixtralEmbeddingsLayer(nn.Module):
+
+class MistralEmbeddingsLayer(nn.Module):
     def __init__(self, config, weights):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
     def forward(self, x): return self.embed_tokens(x)
 
-class MixtralHeadLayer(nn.Module):
+
+class MistralHeadLayer(nn.Module):
     def __init__(self, config, weights):
         super().__init__()
-        self.norm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
     def forward(self, x): return self.lm_head(self.norm(x))
