@@ -120,7 +120,7 @@ def main():
         f"%%writefile examples/kaggle/cpp_vs_python_benchmark.py\n{cpp_bench}"
     ))
     notebook_cells.append(create_notebook_cell(
-        "# DISABLED: !python examples/kaggle/cpp_vs_python_benchmark.py"
+        "!python examples/kaggle/cpp_vs_python_benchmark.py"
     ))
 
     # 9. BENCHMARK: VRAM & Throughput (PEFT vs LEMA)
@@ -135,7 +135,7 @@ def main():
         f"%%writefile examples/kaggle/scaling_benchmark.py\n{scaling_bench}"
     ))
     notebook_cells.append(create_notebook_cell(
-        "# DISABLED: !python examples/kaggle/scaling_benchmark.py"
+        "!python examples/kaggle/scaling_benchmark.py"
     ))
 
     # 10. BENCHMARK 3: RESIDENT vs STREAMING strategy
@@ -149,7 +149,7 @@ def main():
         f"%%writefile examples/kaggle/bench_strategy.py\n{strategy_bench}"
     ))
     notebook_cells.append(create_notebook_cell(
-        "# DISABLED: !python examples/kaggle/bench_strategy.py"
+        "!python examples/kaggle/bench_strategy.py"
     ))
 
     # 11. BENCHMARK 4: LEMA vs CPU offload
@@ -163,7 +163,7 @@ def main():
         f"%%writefile examples/kaggle/bench_cpu_offload.py\n{cpu_bench}"
     ))
     notebook_cells.append(create_notebook_cell(
-        "# DISABLED: !python examples/kaggle/bench_cpu_offload.py"
+        "!python examples/kaggle/bench_cpu_offload.py"
     ))
 
     # 12. BENCHMARK 5: VRAM stability test
@@ -192,7 +192,7 @@ def main():
         f"%%writefile examples/kaggle/bench_longseq.py\n{longseq_bench}"
     ))
     notebook_cells.append(create_notebook_cell(
-        "# DISABLED: !python examples/kaggle/bench_longseq.py"
+        "!python examples/kaggle/bench_longseq.py"
     ))
 
     # 14. DEMO: Quick training verification (GPT-2)
