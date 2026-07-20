@@ -125,7 +125,8 @@ class TripleBufferManager:
             names = self.adapter.get_param_names_for_layer(layer['id'])
             for name in names:
                 shape = self.gbi.get_tensor_shape(name)
-                total += torch.Size(shape).numel()
+                if shape is not None:
+                    total += torch.Size(shape).numel()
         return total
 
     def _calculate_max_params(self) -> int:
@@ -134,9 +135,18 @@ class TripleBufferManager:
             names = self.adapter.get_param_names_for_layer(layer['id'])
             current_p = 0
             for name in names:
-                shape = self.gbi.get_tensor_shape(name)
+                try:
+                    shape = self.gbi.get_tensor_shape(name)
+                except Exception as e:
+                    logger.warning(f"Error getting shape for '{name}': {e}")
+                    continue
+                if shape is None:
+                    logger.warning(f"Tensor '{name}' not found in GBI, skipping")
+                    continue
                 current_p += torch.Size(shape).numel()
             max_p = max(max_p, current_p)
+        if max_p == 0:
+            raise RuntimeError(f"No valid tensor shapes found. Available GBI keys: {list(self.gbi.get_keys())[:20]}...")
         return max_p
 
     def _initialize_ram_cache(self):

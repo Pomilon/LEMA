@@ -3,12 +3,15 @@ from .llama import LlamaAdapter
 from .gpt2 import GPT2Adapter
 from .mistral import MistralAdapter
 from .mixtral import MixtralAdapter
+from .lfm2 import Lfm2Adapter
 
 _ADAPTER_REGISTRY = {
     "llama": LlamaAdapter,
     "gpt2": GPT2Adapter,
     "mistral": MistralAdapter,
-    "mixtral": MixtralAdapter
+    "mixtral": MixtralAdapter,
+    "lfm2_moe": Lfm2Adapter,
+    "lfm2": Lfm2Adapter,
 }
 
 def get_adapter(model_type: str, config: dict) -> LemaModelAdapter:

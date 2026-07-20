@@ -53,6 +53,10 @@ class GlobalBinaryIndex:
 
     def get_tensor_shape(self, name: str):
         if name in self.param_map:
-            # safe_open handles don't have a direct shape check without get_slice
-            return self.param_map[name].get_slice(name).get_shape()
+            try:
+                return self.param_map[name].get_slice(name).get_shape()
+            except Exception as e:
+                # Skip problematic tensors (e.g. Conv1D depthwise weights with
+                # shape mismatch between file storage and PyTorch convention)
+                return None
         return None

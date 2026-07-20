@@ -176,6 +176,53 @@ def main():
     notebook_cells.append(create_notebook_cell("# RUN MIXTRAL FINE-TUNING", cell_type="markdown"))
     notebook_cells.append(create_notebook_cell("%run tasks/fine_tune_mixtral.py"))
 
+    # 19. VERIFY: LFM2.5 8B A1B — load, forward, fine-tune
+    notebook_cells.append(create_notebook_cell(
+        "# LFM2.5 8B A1B VERIFICATION\n"
+        "# Loads the model, runs a forward step, and fine-tunes with dummy data.\n"
+        "# Requires transformers >= 5.0.0, downloads ~4.5GB from HF Hub.",
+        cell_type="markdown"
+    ))
+    notebook_cells.append(create_notebook_cell(
+        "import torch, sys, gc, time, os\n"
+        "sys.path.insert(0, os.path.abspath('src'))\n"
+        "from lema import LemaConfig, LemaModel, MemoryStrategy, logger\n"
+        "\n"
+        "print('=== LFM2.5 8B A1B: Load & Verify ===')\n"
+        "config = LemaConfig(\n"
+        "    model_name_or_path='LiquidAI/LFM2.5-8B-A1B',\n"
+        "    device='cuda',\n"
+        "    strategy=MemoryStrategy.STREAMING,\n"
+        "    lora_rank=8,\n"
+        "    lora_target_modules=['q_proj','k_proj','v_proj','out_proj','w1','w2','w3'],\n"
+        "    gradient_checkpointing=True,\n"
+        ")\n"
+        "model = LemaModel(config)\n"
+        "model.initialize_lora()\n"
+        "print('Model loaded and LoRA initialized OK')\n"
+        "\n"
+        "optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=1e-4)\n"
+        "trainer = model.get_trainer(optimizer)\n"
+        "\n"
+        "# Forward + backward with dummy data\n"
+        "input_ids = torch.randint(0, 1000, (1, 128)).cuda()\n"
+        "logits, loss = trainer.train_step(input_ids, labels=input_ids)\n"
+        "torch.cuda.synchronize()\n"
+        "print(f'Step 1 OK — loss={loss:.4f}, logits shape={logits.shape}')\n"
+        "\n"
+        "# Fine-tune a few more steps to verify training works\n"
+        "for step in range(4):\n"
+        "    t0 = time.perf_counter()\n"
+        "    _, loss = trainer.train_step(input_ids, labels=input_ids)\n"
+        "    torch.cuda.synchronize()\n"
+        "    dt = (time.perf_counter() - t0) * 1000\n"
+        "    print(f'  Step {step+2}/{5} — loss={loss:.4f}, time={dt:.0f}ms')\n"
+        "\n"
+        "print('=== LFM2.5 8B A1B: Verification complete ===')\n"
+        "del model, trainer, optimizer\n"
+        "gc.collect(); torch.cuda.empty_cache()"
+    ))
+
     # Construct Notebook JSON
     notebook = {
         "cells": notebook_cells,
