@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import numpy as np
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -439,3 +440,115 @@ class TensorStore:
 
     def __len__(self) -> int:
         return len(self._resident)
+
+
+class KVChunkStore:
+    """Stores and streams KV cache chunks, keyed by (layer_id, chunk_idx).
+
+    RAM primary (pinned dict), mmap file fallback when RAM budget is exhausted.
+    Supports incremental append for generation (grows the current chunk, rolls
+    to a new chunk at the boundary)."""
+
+    def __init__(self, kv_chunk_size: int = 8192, max_ram_gb: float = 0.0,
+                 disk_dir: str | None = None, dtype: torch.dtype = torch.float32,
+                 device: str = "cpu"):
+        self.kv_chunk_size = kv_chunk_size
+        self.max_ram_gb = max_ram_gb
+        self.disk_dir = disk_dir
+        self.dtype = dtype
+        self.device = device
+        self._ram: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._sizes: dict[tuple[int, int], int] = {}
+        self._current: dict[int, int] = {}   # layer -> current chunk_idx
+        self._current_size: dict[int, int] = {}  # layer -> tokens in current chunk
+        self._memmaps: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+        self._files: dict[tuple[int, int], object] = {}
+
+    def address(self, layer_id: int, chunk_idx: int) -> tuple[StreamKind, int, str]:
+        return (StreamKind.KV_CHUNK, layer_id, f"chunk_{chunk_idx}")
+
+    def _use_disk(self) -> bool:
+        if self.disk_dir is None:
+            return False
+        if self.max_ram_gb > 0:
+            est_gb = sum(k.numel() * k.element_size() * 2 for k, _ in self._ram.values())
+            return est_gb > self.max_ram_gb * 1e9
+        return True
+
+    def _disk_paths(self, layer_id: int, chunk_idx: int):
+        import os
+        base = os.path.join(self.disk_dir, f"kv_{layer_id}_{chunk_idx}")
+        return base + "_k.bin", base + "_v.bin"
+
+    def stash(self, layer_id: int, chunk_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        key = (layer_id, chunk_idx)
+        self._sizes[key] = k.shape[2]
+        if not self._use_disk():
+            self._ram[key] = (k.to(self.device), v.to(self.device))
+            return
+        import numpy as _np
+        kp, vp = self._disk_paths(layer_id, chunk_idx)
+        km = _np.memmap(kp, dtype="float32", mode="w+", shape=k.shape)
+        vm = _np.memmap(vp, dtype="float32", mode="w+", shape=v.shape)
+        km[:] = k.float().numpy()
+        vm[:] = v.float().numpy()
+        km.flush(); vm.flush()
+        self._memmaps[key] = (km, vm)
+        self._files[key] = None
+
+    def load(self, layer_id: int, chunk_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (layer_id, chunk_idx)
+        if key in self._ram:
+            return self._ram[key]
+        if key in self._memmaps:
+            km, vm = self._memmaps[key]
+            return (torch.from_numpy(np.array(km)).to(self.dtype).to(self.device),
+                    torch.from_numpy(np.array(vm)).to(self.dtype).to(self.device))
+        raise KeyError(f"KV chunk not found: {key}")
+
+    def append(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        """Append one token's K/V to the current chunk, rolling to a new chunk
+        at the boundary. k/v shape: (batch, heads, 1, head_dim)."""
+        cur = self._current.get(layer_id, 0)
+        size = self._current_size.get(layer_id, 0)
+        key = (layer_id, cur)
+        if size == 0:
+            self.stash(layer_id, cur, k, v)
+            self._current_size[layer_id] = 1
+            if self.kv_chunk_size == 1:
+                self._current[layer_id] = cur + 1
+                self._current_size[layer_id] = 0
+            return
+        # grow current chunk: load, concatenate, re-stash
+        if not self._use_disk() and key in self._ram:
+            k_cur, v_cur = self._ram[key]
+            k_new = torch.cat([k_cur, k], dim=2)
+            v_new = torch.cat([v_cur, v], dim=2)
+            self._ram[key] = (k_new, v_new)
+            self._sizes[key] = k_new.shape[2]
+        else:
+            k_cur, v_cur = self.load(layer_id, cur)
+            k_new = torch.cat([k_cur, k], dim=2)
+            v_new = torch.cat([v_cur, v], dim=2)
+            self.stash(layer_id, cur, k_new, v_new)
+        self._current_size[layer_id] = size + 1
+        if self._current_size[layer_id] >= self.kv_chunk_size:
+            self._current[layer_id] = cur + 1
+            self._current_size[layer_id] = 0
+
+    def num_chunks(self, layer_id: int) -> int:
+        return self._current.get(layer_id, 0) + (1 if self._current_size.get(layer_id, 0) > 0 else 0)
+
+    def current_size(self, layer_id: int) -> int:
+        return self._current_size.get(layer_id, 0)
+
+    def close(self) -> None:
+        for f in self._files.values():
+            try:
+                if f is not None:
+                    f.close()
+            except Exception:
+                pass
+        self._files.clear()
+        self._memmaps.clear()
+        self._ram.clear()
