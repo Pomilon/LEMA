@@ -100,9 +100,7 @@ class LemaTrainer:
                     if prefetch_idx < len(self.layers):
                         self.memory.prefetch_to_ram_async(self.layers[prefetch_idx]['id'], prefetch_idx % 2)
 
-                if self.full_ft_manager is not None:
-                    self.adapter._full_ft_manager = self.full_ft_manager
-                layer_module = self.adapter.construct_layer_module(layer_meta['id'], flat_vram, self.lora_manager)
+                layer_module = self.adapter.construct_layer_module(layer_meta['id'], flat_vram, self.lora_manager, self.full_ft_manager)
 
                 # Save input for backward (detached from graph)
                 current_input = hidden_states.detach() if isinstance(hidden_states, torch.Tensor) else hidden_states[0].detach()
@@ -132,9 +130,7 @@ class LemaTrainer:
             prev_slot = (i - 1) % 2
 
             flat_vram = self.memory.get_vram_flat_buffer(slot)
-            if self.full_ft_manager is not None:
-                self.adapter._full_ft_manager = self.full_ft_manager
-            layer_module = self.adapter.construct_layer_module(self.layers[i]['id'], flat_vram, self.lora_manager)
+            layer_module = self.adapter.construct_layer_module(self.layers[i]['id'], flat_vram, self.lora_manager, self.full_ft_manager)
 
             if i - 1 >= 0:
                 self.memory.wait_prefetch(prev_slot)

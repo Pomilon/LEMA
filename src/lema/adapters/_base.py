@@ -18,7 +18,7 @@ class LemaModelAdapter(ABC):
     @abstractmethod
     def construct_layer_module(
         self, layer_id: int, weights: dict[str, torch.Tensor] | torch.Tensor | None,
-        lora_manager: Any = None
+        lora_manager: Any = None, full_ft_manager: Any = None
     ) -> nn.Module: ...
 
     @abstractmethod

@@ -56,7 +56,7 @@ class LlamaAdapter(LemaModelAdapter):
             return ['model.norm.weight', 'lm_head.weight']
         return []
 
-    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None) -> nn.Module:
+    def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None, full_ft_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         # Pop matching module from sliding-window pool, or create on CPU
@@ -99,9 +99,8 @@ class LlamaAdapter(LemaModelAdapter):
                 for param, offset, numel, shape in mapping:
                     param.data.copy_(flat_buffer[offset:offset+numel].view(shape), non_blocking=True)
 
-        fm = getattr(self, "_full_ft_manager", None)
-        if fm is not None:
-            fm.apply_to_module(layer_id, module)
+        if full_ft_manager is not None:
+            full_ft_manager.apply_to_module(layer_id, module)
 
         return module
 
