@@ -280,7 +280,11 @@ class FullFTManager:
             for name in f.keys():
                 key = name_to_key.get(name)
                 if key is not None:
-                    self.true_weights[key].add_(f.get_tensor(name).to(self.true_weights[key].dtype))
+                    # Add in fp32 then cast once: adding in model dtype would round
+                    # the fp32 delta before the add and silently lose precision
+                    # (original + delta != w for fp16/bf16 weights).
+                    restored = self.original[key].float() + f.get_tensor(name).float()
+                    self.true_weights[key].copy_(restored.to(self.true_weights[key].dtype))
 
     def save_optimizer(self, save_directory: str) -> None:
         import os

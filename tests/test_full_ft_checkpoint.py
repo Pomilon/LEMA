@@ -131,3 +131,45 @@ def test_load_optimizer_missing_file_is_noop(tmp_path):
     for key, s in manager.opt_states.items():
         assert torch.equal(s["exp_avg"], before_states[key]["exp_avg"]), key
         assert torch.equal(s["exp_avg_sq"], before_states[key]["exp_avg_sq"]), key
+
+
+def test_delta_round_trip_exact_at_model_dtype(tmp_path):
+    """Delta restore must not lose precision when true weights are stored at
+    model dtype (fp16/bf16). Adding the fp32 delta in model dtype double-rounds,
+    making original + delta != w. The sum must be computed in fp32, cast once."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    model_path = model_dir / "model.safetensors"
+    hf_cfg = GPT2Config(vocab_size=64, n_positions=16, n_embd=16, n_layer=2, n_head=2,
+                        attn_implementation="eager", tie_word_embeddings=False)
+    model = GPT2LMHeadModel(hf_cfg).half()
+    save_file({k: v.contiguous().clone() for k, v in model.state_dict().items()}, str(model_path))
+    hf_cfg.save_pretrained(str(model_dir))
+
+    lema_cfg = LemaConfig(model_name_or_path=str(model_dir), model_type="gpt2",
+                          gbi_path=str(model_path), device="cpu",
+                          dtype="float16",
+                          strategy=MemoryStrategy.STREAMING, training_mode="selective_full",
+                          trainable_modules=["c_attn"], trainable_layers=["last:1"],
+                          learning_rate=0.05, weight_decay=0.0,
+                          save_steps=999, max_ram_gb=64, output_dir=str(tmp_path))
+    m = LemaModel(lema_cfg)
+    key = next(iter(m.full_ft_manager.true_weights))
+    assert m.full_ft_manager.true_weights[key].dtype == torch.float16
+    trainer = m.get_trainer()
+    ids = torch.randint(0, 64, (1, 10))
+    for _ in range(3):
+        trainer.train_step(ids, labels=ids)
+
+    ckpt = tmp_path / "ckpt"
+    m.full_ft_manager.save_delta(str(ckpt))
+
+    m2 = LemaModel(LemaConfig(model_name_or_path=str(model_dir), model_type="gpt2",
+                              gbi_path=str(model_path), device="cpu",
+                              dtype="float16",
+                              strategy=MemoryStrategy.STREAMING,
+                              training_mode="selective_full",
+                              trainable_modules=["c_attn"], trainable_layers=["last:1"]))
+    m2.full_ft_manager.load_delta(str(ckpt))
+    for key, w in m.full_ft_manager.true_weights.items():
+        assert torch.equal(w, m2.full_ft_manager.true_weights[key]), key
