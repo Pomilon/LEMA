@@ -103,7 +103,7 @@ def main():
         "\n"
         "sys.path.insert(0, os.path.abspath('src'))\n"
         "import lema\n"
-        "from lema._memory import HAS_CPP_BACKEND\n"
+        "from lema._tensorstore import HAS_CPP_BACKEND\n"
         "print(f'LEMA loaded. C++ backend: {HAS_CPP_BACKEND}')\n"
         "if not HAS_CPP_BACKEND and torch.cuda.is_available():\n"
         "    print('Running in pure Python mode — performance may be lower.')"

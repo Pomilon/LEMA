@@ -15,8 +15,7 @@ from ._config import LemaConfig, MemoryStrategy, TrainingMode
 from .adapters import get_adapter
 from ._gbi import GlobalBinaryIndex
 from ._lora import LoRAManager
-from ._memory import TripleBufferManager
-from ._tensorstore import TensorStore, Stream, StreamKind
+from ._tensorstore import TensorStore, Stream, StreamKind, _TransferEngine
 from ._utils._logger import logger
 from ._utils._conversion import convert_to_monolith
 from ._trainer import LemaTrainer
@@ -111,24 +110,17 @@ class LemaModel:
                 "target_modules": self.config.lora_target_modules
             }, device=self.config.device, dtype=model_dtype)
 
-        # 6. Initialize Memory Manager
-        self.memory = TripleBufferManager(
-            self.gbi,
-            self.adapter,
-            config=self.config
-        )
-
-        # 7. Initialize TensorStore (unified stream registry + budget)
+        # 6. Initialize TensorStore (unified stream registry + transfer engine + budget)
         self.store = self._build_store()
 
-        # 8. Full-FT Manager (registers its true weights/states/accumulators
+        # 7. Full-FT Manager (registers its true weights/states/accumulators
         #    as streams on the store)
         if config.training_mode == TrainingMode.SELECTIVE_FULL:
             from ._full_ft import FullFTManager
             self.full_ft_manager = FullFTManager(self.gbi, self.adapter, config, store=self.store)
 
     def _build_store(self) -> TensorStore:
-        store = TensorStore.with_budget(self.config)
+        store = TensorStore.with_budget(self.config, gbi=self.gbi, adapter=self.adapter)
         store.set_device(self.config.device)
         meta = self.adapter.get_layer_metadata()
         for layer in meta:
@@ -137,7 +129,7 @@ class LemaModel:
                 if shape is not None:
                     store.register(Stream(
                         StreamKind.WEIGHTS, layer["id"], name, tuple(shape),
-                        self.memory.dtype,
+                        store.dtype,
                         source=lambda n=name: self.gbi.load_tensors([n], device="cpu")[n],
                     ))
         return store
@@ -162,8 +154,8 @@ class LemaModel:
         """Releases all resources: C++ backend, thread pool, RAM/VRAM buffers, file handles."""
         if hasattr(self, "full_ft_manager") and self.full_ft_manager is not None:
             self.full_ft_manager.close()
-        if hasattr(self, "memory") and self.memory is not None:
-            self.memory.close()
+        if hasattr(self, "store") and self.store is not None:
+            self.store.close()
         if hasattr(self, "gbi") and self.gbi is not None:
             self.gbi.close()
 
@@ -204,8 +196,9 @@ class LemaModel:
         # where the dry-run's LoRA-oriented trainer does not apply)
         if self.full_ft_manager is None and (self.config.max_ram_gb <= 0 or auto_optimize):
             self.simulate_and_optimize()
-            # Re-init memory with optimized config
-            self.memory = TripleBufferManager(self.gbi, self.adapter, config=self.config)
+            # Re-init store (transfer engine) with optimized config
+            self.store.close()
+            self.store = self._build_store()
 
         return LemaTrainer(
              config=self.config,
@@ -213,7 +206,7 @@ class LemaModel:
              gbi=self.gbi,
              lora_manager=self.lora_manager,
              full_ft_manager=self.full_ft_manager,
-             memory_manager=self.memory,
+             memory_manager=self.store.transfer,
              store=self.store,
              optimizer=optimizer,
              **kwargs
@@ -226,9 +219,9 @@ class LemaModel:
         """
         logger.info("LEMA: Running Sophisticated Dynamic Flight Check...")
 
-        # 1. Initialize temporary memory manager for profiling
+        # 1. Initialize temporary transfer engine for profiling
         # We use a temporary one to avoid side-effects on the main trainer
-        temp_mem = TripleBufferManager(self.gbi, self.adapter, config=self.config)
+        temp_mem = _TransferEngine(self.gbi, self.adapter, config=self.config)
         itemsize = temp_mem.itemsize
 
         # 2. Benchmark Disk -> RAM (Actual Tensors)
@@ -266,7 +259,6 @@ class LemaModel:
             memory_manager=temp_mem,
             optimizer=dummy_optimizer
         )
-
         # Use a real sequence length of 512 (common default)
         dummy_input = torch.randint(0, 100, (1, 512), device=self.config.device)
 
@@ -351,5 +343,8 @@ class LemaModel:
         self.config.device = device
         if self.lora_manager is not None:
             self.lora_manager.device = device
-        self.memory.device = device
+        if self.store is not None:
+            self.store.set_device(device)
+            if self.store.transfer is not None:
+                self.store.transfer.device = device
         return self

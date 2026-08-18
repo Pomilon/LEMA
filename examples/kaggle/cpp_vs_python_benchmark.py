@@ -22,7 +22,7 @@ from lema._lora import LoRAManager
 from lema._trainer import LemaTrainer
 from lema._utils._logger import logger
 from lema.adapters._gpt2 import GPT2Adapter
-from lema._memory import TripleBufferManager, HAS_CPP_BACKEND
+from lema._tensorstore import HAS_CPP_BACKEND
 
 
 def benchmark_packing(adapter, gbi, num_warmup=5, num_iters=30):
@@ -190,9 +190,9 @@ def benchmark_training_loop(tmp_dir, use_cpp_backend: bool):
     from safetensors.torch import save_file
 
     # Force C++ backend on/off
-    import lema._memory as mem_module
-    old_status = mem_module.HAS_CPP_BACKEND
-    mem_module.HAS_CPP_BACKEND = use_cpp_backend and HAS_CPP_BACKEND
+    import lema._tensorstore as ts_module
+    old_status = ts_module.HAS_CPP_BACKEND
+    ts_module.HAS_CPP_BACKEND = use_cpp_backend and HAS_CPP_BACKEND
 
     try:
         config_hf = GPT2Config(
@@ -244,7 +244,7 @@ def benchmark_training_loop(tmp_dir, use_cpp_backend: bool):
 
         return (t_elapsed / num_steps) * 1000  # ms/step
     finally:
-        mem_module.HAS_CPP_BACKEND = old_status
+        ts_module.HAS_CPP_BACKEND = old_status
 
 
 def run_all_benchmarks(tmp_dir):
