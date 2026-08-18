@@ -51,6 +51,13 @@ class LemaConfig:
     grad_accum_backend: str = "auto"
     save_optimizer: bool = True
     weight_decay: float = 0.01
+    weights_vram: str = "auto"
+    opt_state_vram: str = "auto"
+    grad_acc_vram: str = "auto"
+    kv_vram: str = "auto"
+    target_step_time_ms: float = 0.0
+    target_tokens_per_sec: float = 0.0
+    kv_chunk_size: int = 8192
 
     def __post_init__(self):
         if self.gbi_path is None:
