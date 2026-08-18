@@ -29,6 +29,7 @@ class FullFTManager:
         self.opt_states: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
         self.accumulators: dict[tuple[int, str], torch.Tensor] = {}
         self.layer_steps: dict[int, int] = {}
+        self.accumulation_step = 0
         self._init_weights()
         self._init_module_name_map()
         self.accumulator_backend = self._choose_accum_backend()

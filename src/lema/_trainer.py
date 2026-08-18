@@ -168,17 +168,19 @@ class LemaTrainer:
             self.adapter.release_layer_module(layer_module)
             del layer_module
 
-        self.accumulation_step += 1
         if self.full_ft_manager is not None:
-            if self.accumulation_step % self.config.gradient_accumulation_steps == 0:
+            self.full_ft_manager.accumulation_step += 1
+            if self.full_ft_manager.accumulation_step % self.config.gradient_accumulation_steps == 0:
                 for layer_id in self.full_ft_manager.selected_layer_keys:
                     self.full_ft_manager.clip_grad_norm_(layer_id, 1.0)
                     self.full_ft_manager.step_layer(layer_id)
-                self.accumulation_step = 0
-        elif self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
-            torch.nn.utils.clip_grad_norm_(self.lora_manager.get_trainable_parameters(), 1.0)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+                self.full_ft_manager.accumulation_step = 0
+        else:
+            self.accumulation_step += 1
+            if self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
+                torch.nn.utils.clip_grad_norm_(self.lora_manager.get_trainable_parameters(), 1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
         self.global_step += 1
 
         if self.config.save_steps > 0 and self.global_step % (self.config.save_steps * self.config.gradient_accumulation_steps) == 0:
