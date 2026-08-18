@@ -248,30 +248,56 @@ class FullFTManager:
     def save_delta(self, save_directory: str) -> None:
         import os
         from safetensors.torch import save_file as st_save
+        os.makedirs(save_directory, exist_ok=True)
         tensors = {}
+        index_weights = {}
         for key, w in self.true_weights.items():
             _, name = key
             tensors[name] = (w.float() - self.original[key].float()).contiguous()
+            index_weights[name] = {"layer_id": key[0]}
         st_save(tensors, os.path.join(save_directory, "delta.safetensors"))
+        index = {"metadata": {"total_size": sum(t.numel() * t.element_size() for t in tensors.values())},
+                 "weights": index_weights}
+        with open(os.path.join(save_directory, "delta.index.json"), "w") as f:
+            json.dump(index, f, indent=2)
+
+    def load_delta(self, load_directory: str) -> None:
+        import os
+        from safetensors import safe_open
+        delta_path = os.path.join(load_directory, "delta.safetensors")
+        if not os.path.exists(delta_path):
+            logger.warning(f"LEMA: no delta.safetensors found in {load_directory} — loading base weights only")
+            return
+        name_to_key = {key[1]: key for key in self.true_weights}
+        with safe_open(delta_path, framework="pt", device="cpu") as f:
+            for name in f.keys():
+                key = name_to_key.get(name)
+                if key is not None:
+                    self.true_weights[key].add_(f.get_tensor(name).to(self.true_weights[key].dtype))
 
     def save_optimizer(self, save_directory: str) -> None:
         import os
-        torch.save(self.layer_steps, os.path.join(save_directory, "layer_steps.bin"))
+        os.makedirs(save_directory, exist_ok=True)
+        states = {
+            f"{key[0]}.{key[1]}": {
+                "exp_avg": s["exp_avg"],
+                "exp_avg_sq": s["exp_avg_sq"],
+            }
+            for key, s in self.opt_states.items()
+        }
+        torch.save({"layer_steps": self.layer_steps, "states": states},
+                   os.path.join(save_directory, "optimizer_fullft.bin"))
 
-    def load_delta(self, save_directory: str) -> None:
+    def load_optimizer(self, load_directory: str) -> None:
         import os
-        from safetensors.torch import load_file
-        path = os.path.join(save_directory, "delta.safetensors")
+        path = os.path.join(load_directory, "optimizer_fullft.bin")
         if not os.path.exists(path):
             return
-        delta = load_file(path)
-        for key, w in self.true_weights.items():
-            _, name = key
-            if name in delta:
-                w.copy_(self.original[key] + delta[name].to(w.dtype))
-
-    def load_optimizer(self, save_directory: str) -> None:
-        import os
-        path = os.path.join(save_directory, "layer_steps.bin")
-        if os.path.exists(path):
-            self.layer_steps = torch.load(path)
+        data = torch.load(path, map_location="cpu", weights_only=False)
+        self.layer_steps = data["layer_steps"]
+        key_by_ref = {f"{key[0]}.{key[1]}": key for key in self.opt_states}
+        for ref, s in data["states"].items():
+            key = key_by_ref.get(ref)
+            if key is not None:
+                self.opt_states[key]["exp_avg"].copy_(s["exp_avg"])
+                self.opt_states[key]["exp_avg_sq"].copy_(s["exp_avg_sq"])

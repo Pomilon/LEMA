@@ -24,3 +24,21 @@ def convert_to_monolith(model_path: str, output_path: str) -> str:
     save_file(merged, output_path)
     logger.info("Conversion complete.")
     return output_path
+
+
+def merge_delta(base_path: str, delta_path: str, out_path: str) -> None:
+    """Merges a full-FT delta into a base safetensors file, writing a servable model."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file as st_save
+
+    with safe_open(delta_path, framework="pt", device="cpu") as d:
+        delta = {k: d.get_tensor(k) for k in d.keys()}
+
+    tensors = {}
+    with safe_open(base_path, framework="pt", device="cpu") as b:
+        for k in b.keys():
+            t = b.get_tensor(k)
+            if k in delta:
+                t = (t.float() + delta[k]).to(t.dtype)
+            tensors[k] = t.contiguous()
+    st_save(tensors, out_path)
