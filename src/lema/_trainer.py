@@ -168,7 +168,7 @@ class LemaTrainer:
             self.adapter.release_layer_module(layer_module)
             del layer_module
 
-        if self.full_ft_manager is not None:
+        if self.full_ft_manager is not None and torch.is_grad_enabled():
             self.full_ft_manager.accumulation_step += 1
             if self.full_ft_manager.accumulation_step % self.config.gradient_accumulation_steps == 0:
                 for layer_id in self.full_ft_manager.selected_layer_keys:

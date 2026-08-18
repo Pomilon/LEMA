@@ -110,6 +110,15 @@ def test_optimizer_state_round_trip(tmp_path):
         assert torch.equal(m2.full_ft_manager.opt_states[key]["exp_avg_sq"], s["exp_avg_sq"]), key
 
 
+def test_optimizer_payload_is_weights_only_safe(tmp_path):
+    model_dir, model_path, hf_cfg, m = make_full_model_dir(tmp_path, trained=True)
+    ckpt = tmp_path / "ckpt"
+    m.full_ft_manager.save_optimizer(str(ckpt))
+    data = torch.load(str(ckpt / "optimizer_fullft.bin"), map_location="cpu", weights_only=True)
+    assert "layer_steps" in data
+    assert "states" in data
+
+
 def test_load_optimizer_missing_file_is_noop(tmp_path):
     model_dir, model_path, hf_cfg, m = make_full_model_dir(tmp_path, trained=False)
     manager = m.full_ft_manager

@@ -218,10 +218,16 @@ class FullFTManager:
 
     def resolve_selection(self) -> None:
         layer_ids = self._resolve_layers()
+        # Tied word embeddings: lm_head.weight is the same logical weight as the
+        # embedding (wte/embed_tokens), so it must not be selected as a separate
+        # trainable tensor (avoids gradient divergence and doubled embedding RAM).
+        tied = bool(getattr(getattr(self.adapter, "hf_config", None), "tie_word_embeddings", False))
         for layer_id in layer_ids:
             names = [
                 n for n in self.adapter.get_param_names_for_layer(layer_id)
-                if self.gbi.get_tensor_shape(n) is not None and self._match_modules(n)
+                if self.gbi.get_tensor_shape(n) is not None
+                and self._match_modules(n)
+                and not (tied and n == "lm_head.weight")
             ]
             if names:
                 self.selected[layer_id] = names
@@ -294,7 +300,7 @@ class FullFTManager:
         path = os.path.join(load_directory, "optimizer_fullft.bin")
         if not os.path.exists(path):
             return
-        data = torch.load(path, map_location="cpu", weights_only=False)
+        data = torch.load(path, map_location="cpu", weights_only=True)
         self.layer_steps = data["layer_steps"]
         key_by_ref = {f"{key[0]}.{key[1]}": key for key in self.opt_states}
         for ref, s in data["states"].items():

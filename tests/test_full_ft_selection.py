@@ -77,4 +77,8 @@ def test_default_empty_is_whole_model(tmp_path):
     from safetensors import safe_open
     with safe_open(str(path), framework="pt", device="cpu") as f:
         all_params = sum(f.get_tensor(k).numel() for k in f.keys())
-    assert mgr.total_selected_params() == all_params
+        tied_lm = f.get_tensor("lm_head.weight").numel() if hf_cfg.tie_word_embeddings else 0
+    # Whole-model selection covers every unique weight; on tied configs lm_head
+    # duplicates the tied wte/embed_tokens weight and is therefore not selected
+    # as a separately-trainable tensor.
+    assert mgr.total_selected_params() == all_params - tied_lm
