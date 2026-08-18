@@ -34,7 +34,8 @@ Successfully fine-tuned `NousResearch/Llama-2-7b-hf` on a custom chat template u
 - **C++/Python Backend**: Explicit toggle (`backend="auto" | "cpp" | "python"`).
 - **Auto Flight Check**: Benchmarks your hardware and auto-tunes `prefetch_distance` and strategy.
 - **5 Model Architectures**: Llama, Mistral, Mixtral (MoE), GPT-2, LFM2 (MoE).
-- **Automatic Checkpointing**: Interval-based saving of LoRA adapters and optimizer states.
+- **Selective Full Fine-Tuning**: Train real model weights (no LoRA) on any selection — attention projections of the last K layers, embeddings, or the entire model — with fp32 optimizer states virtualized into RAM (mmap fallback) the same way weights are.
+- **Automatic Checkpointing**: Interval-based saving of LoRA adapters or full-FT delta + optimizer states.
 - **Module Pool**: Sliding-window module recycling keeps VRAM constant regardless of model depth.
 
 ## Installation
@@ -70,6 +71,48 @@ trainer = model.get_trainer(optimizer)
 
 input_ids = torch.randint(0, 32000, (1, 512)).cuda()
 logits, loss = trainer.train_step(input_ids, labels=input_ids)
+```
+
+## Selective Full Fine-Tuning
+
+Instead of LoRA adapters, LEMA can train the real model weights directly — a subset of your choosing — using the same VRAM-virtualizing pipeline. Optimizer states and gradient accumulation are fp32 and live in RAM (with an optional mmap disk backend), so even whole-model training stays off-VRAM.
+
+```python
+from lema import LemaConfig, LemaModel, MemoryStrategy
+
+config = LemaConfig(
+    model_name_or_path="NousResearch/Llama-2-7b-hf",
+    strategy=MemoryStrategy.STREAMING,
+    training_mode="selective_full",      # instead of LoRA
+    trainable_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    trainable_layers=["last:4"],         # last 4 decoder layers
+    learning_rate=1e-4,
+    save_steps=500,
+    output_dir="checkpoints",
+)
+
+model = LemaModel(config)                 # no initialize_lora() needed
+trainer = model.get_trainer()             # optimizer handled internally (per-layer AdamW)
+
+logits, loss = trainer.train_step(input_ids, labels=input_ids)
+```
+
+**Selection syntax** (`trainable_modules` × `trainable_layers`):
+
+| `trainable_modules` | `trainable_layers` | Result |
+|---|---|---|
+| `["q_proj","k_proj","v_proj","o_proj"]` | `["last:4"]` | Attention projections of the last 4 layers |
+| `["c_attn"]` | `["first:2"]` | GPT-2 attention of the first 2 layers |
+| `[]` | `["emb","head"]` | Embeddings + LM head only |
+| `[]` | `[]` | **Whole model** (all weights, LOMO-style) |
+
+`trainable_modules` entries are suffix matches against parameter names; `trainable_layers` accepts `"last:K"`, `"first:K"`, explicit layer IDs, `"emb"`, and `"head"`.
+
+**Checkpoints & serving:** training saves a small fp32 **delta** (`updated − original`) plus optimizer state. Restore with `LemaModel.from_pretrained` (weights + optimizer), or produce a servable full model with `merge_delta`:
+
+```python
+from lema._utils._conversion import merge_delta
+merge_delta(base_safetensors, "checkpoints/checkpoint-500/delta.safetensors", "merged.safetensors")
 ```
 
 ## Documentation

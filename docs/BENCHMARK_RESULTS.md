@@ -118,3 +118,21 @@ LEMA reaches 2048 vs PEFT's 512 on a 14.6 GB T4 -- a 4x improvement in usable se
 | LEMA Streaming | 2390 ms | 1.4 GB |
 
 CPU offload is faster when the model fits in VRAM. LEMA's streaming advantage appears at 7B+ scale where repeated CPU-GPU transfers dominate.
+
+## Selective Full Fine-Tuning (TinyLlama 1.1B)
+
+Selection: q/k/v/o projections of the last 4 decoder layers (37.7M params, ~3.4% of the 1.1B model), trained under `STREAMING` with fp32 states in RAM. Verified in the Kaggle notebook's full-FT demo cells (all modes) on a T4.
+
+| Metric | Value |
+|---|---|
+| Selected params | 37,748,736 (~3.4% of 1.1B; GQA: 4 KV heads vs 32 Q heads) |
+| fp32 state footprint | ~0.151 GB (true weights + Adam moments) |
+| VRAM (constant) | **0.75 GB** |
+| RAM | ~4.9 GB |
+| Step time | ~1.1–1.6 s (seq=64) |
+| Loss (6 steps) | 13.56 → 4.69 |
+| Resume (delta + optimizer restore) | weights match exactly; training continues (loss 4.69 → 3.77) |
+
+Other verified full-FT modes (tiny GPT-2, CUDA): whole-model (LOMO-style), emb/head-only, disk gradient-accumulation backend, gradient-accumulation boundaries (`accum_steps=2` steps only at the boundary), and checkpoint → `merge_delta` → restore → resume.
+
+The full-FT selection triple (`trainable_modules` × `trainable_layers`) supports arbitrary subsets up to whole-model fine-tuning; VRAM stays at the single-layer working set while RAM scales with the selected parameter count.
