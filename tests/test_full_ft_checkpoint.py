@@ -79,3 +79,46 @@ def test_from_pretrained_applies_delta(tmp_path):
     m2 = LemaModel.from_pretrained(str(ckpt), device="cpu")
     for key, w in m.full_ft_manager.true_weights.items():
         assert torch.allclose(w, m2.full_ft_manager.true_weights[key], atol=1e-4)
+
+
+def _fresh_manager(model_dir, model_path, tmp_path):
+    return LemaModel(LemaConfig(model_name_or_path=str(model_dir), model_type="gpt2",
+                                gbi_path=str(model_path), device="cpu",
+                                dtype="float32",
+                                strategy=MemoryStrategy.STREAMING,
+                                training_mode="selective_full",
+                                trainable_modules=["c_attn"], trainable_layers=["last:1"],
+                                learning_rate=0.05, weight_decay=0.0,
+                                max_ram_gb=64, output_dir=str(tmp_path)))
+
+
+def test_optimizer_state_round_trip(tmp_path):
+    model_dir, model_path, hf_cfg, m = make_full_model_dir(tmp_path, trained=True)
+    manager = m.full_ft_manager
+    assert any(s["exp_avg"].abs().max() > 0 for s in manager.opt_states.values()), \
+        "trained model must have nonzero exp_avg moments"
+
+    ckpt = tmp_path / "ckpt"
+    manager.save_optimizer(str(ckpt))
+    assert (ckpt / "optimizer_fullft.bin").exists()
+
+    m2 = _fresh_manager(model_dir, model_path, tmp_path)
+    m2.full_ft_manager.load_optimizer(str(ckpt))
+    assert m2.full_ft_manager.layer_steps == manager.layer_steps
+    for key, s in manager.opt_states.items():
+        assert torch.equal(m2.full_ft_manager.opt_states[key]["exp_avg"], s["exp_avg"]), key
+        assert torch.equal(m2.full_ft_manager.opt_states[key]["exp_avg_sq"], s["exp_avg_sq"]), key
+
+
+def test_load_optimizer_missing_file_is_noop(tmp_path):
+    model_dir, model_path, hf_cfg, m = make_full_model_dir(tmp_path, trained=False)
+    manager = m.full_ft_manager
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    before_steps = dict(manager.layer_steps)
+    before_states = {k: {m: t.clone() for m, t in s.items()} for k, s in manager.opt_states.items()}
+    manager.load_optimizer(str(empty))
+    assert manager.layer_steps == before_steps
+    for key, s in manager.opt_states.items():
+        assert torch.equal(s["exp_avg"], before_states[key]["exp_avg"]), key
+        assert torch.equal(s["exp_avg_sq"], before_states[key]["exp_avg_sq"]), key
