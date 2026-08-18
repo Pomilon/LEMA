@@ -7,6 +7,7 @@ from typing import Any
 from tqdm import tqdm
 
 from ._memory import TripleBufferManager
+from ._tensorstore import TensorStore, StreamKind
 from .adapters._base import LemaModelAdapter
 from ._config import LemaConfig, MemoryStrategy
 from ._utils._logger import logger
@@ -27,13 +28,15 @@ class LemaTrainer:
                  lora_manager: Any = None, 
                  optimizer: torch.optim.Optimizer | None = None,
                  memory_manager: TripleBufferManager | None = None,
-                 full_ft_manager: Any = None):
+                 full_ft_manager: Any = None,
+                 store: TensorStore | None = None):
         
         self.config = config
         self.adapter = model_adapter
         self.gbi = gbi
         self.device = config.device
         self.strategy = config.strategy
+        self.store = store
         
         # Use provided memory manager or create a new one
         if memory_manager is not None:
@@ -47,6 +50,25 @@ class LemaTrainer:
         self.optimizer = optimizer
         self.global_step = 0
         self.accumulation_step = 0
+
+    def _store_layer_flat(self, layer_id: int) -> torch.Tensor | None:
+        """Materialize a layer's weight flat buffer from the store, or None if
+        the store has no streams for this layer (fall back to the memory manager)."""
+        if self.store is None:
+            return None
+        names = self.adapter.get_param_names_for_layer(layer_id)
+        keys = [(StreamKind.WEIGHTS, layer_id, n) for n in names]
+        if not all(k in self.store for k in keys):
+            return None
+        tensors = self.store.ensure(*keys)
+        total = sum(t.numel() for t in tensors.values())
+        buf = torch.empty(total, device=self.device, dtype=tensors[keys[0]].dtype)
+        offset = 0
+        for k in keys:
+            t = tensors[k]
+            buf[offset:offset + t.numel()].copy_(t.view(-1), non_blocking=True)
+            offset += t.numel()
+        return buf
 
     def close(self):
         """Releases the memory manager."""
@@ -91,7 +113,9 @@ class LemaTrainer:
                 slot = i % 2
                 next_slot = (i + 1) % 2
 
-                flat_vram = self.memory.get_vram_flat_buffer(slot)
+                flat_vram = self._store_layer_flat(layer_meta['id'])
+                if flat_vram is None:
+                    flat_vram = self.memory.get_vram_flat_buffer(slot)
 
                 if i + 1 < len(self.layers):
                     self.memory.wait_prefetch(next_slot)
@@ -129,7 +153,9 @@ class LemaTrainer:
             slot = i % 2
             prev_slot = (i - 1) % 2
 
-            flat_vram = self.memory.get_vram_flat_buffer(slot)
+            flat_vram = self._store_layer_flat(self.layers[i]['id'])
+            if flat_vram is None:
+                flat_vram = self.memory.get_vram_flat_buffer(slot)
             layer_module = self.adapter.construct_layer_module(self.layers[i]['id'], flat_vram, self.lora_manager, self.full_ft_manager)
 
             if i - 1 >= 0:

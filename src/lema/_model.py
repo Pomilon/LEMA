@@ -16,6 +16,7 @@ from .adapters import get_adapter
 from ._gbi import GlobalBinaryIndex
 from ._lora import LoRAManager
 from ._memory import TripleBufferManager
+from ._tensorstore import TensorStore, Stream, StreamKind
 from ._utils._logger import logger
 from ._utils._conversion import convert_to_monolith
 from ._trainer import LemaTrainer
@@ -119,6 +120,24 @@ class LemaModel:
             config=self.config
         )
 
+        # 7. Initialize TensorStore (unified stream registry + budget)
+        self.store = self._build_store()
+
+    def _build_store(self) -> TensorStore:
+        store = TensorStore.with_budget(self.config)
+        store.set_device(self.config.device)
+        meta = self.adapter.get_layer_metadata()
+        for layer in meta:
+            for name in self.adapter.get_param_names_for_layer(layer["id"]):
+                shape = self.gbi.get_tensor_shape(name)
+                if shape is not None:
+                    store.register(Stream(
+                        StreamKind.WEIGHTS, layer["id"], name, tuple(shape),
+                        self.memory.dtype,
+                        source=lambda n=name: self.gbi.load_tensors([n], device="cpu")[n],
+                    ))
+        return store
+
 
     @classmethod
     def from_pretrained(cls, path: str, **kwargs):
@@ -191,6 +210,7 @@ class LemaModel:
              lora_manager=self.lora_manager,
              full_ft_manager=self.full_ft_manager,
              memory_manager=self.memory,
+             store=self.store,
              optimizer=optimizer,
              **kwargs
         )
