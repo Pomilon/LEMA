@@ -8,16 +8,18 @@ import numpy as np
 import torch
 
 from ._config import LemaConfig, TrainingMode
+from ._tensorstore import Stream, StreamKind
 from ._utils._logger import logger
 
 
 class FullFTManager:
     """Resolves and holds the trainable-weight selection for selective full FT."""
 
-    def __init__(self, gbi: Any, adapter: Any, config: LemaConfig):
+    def __init__(self, gbi: Any, adapter: Any, config: LemaConfig, store: Any = None):
         self.gbi = gbi
         self.adapter = adapter
         self.config = config
+        self.store = store
         if config.training_mode != TrainingMode.SELECTIVE_FULL:
             raise ValueError("FullFTManager requires training_mode='selective_full'")
         self.selected: dict[int, list[str]] = {}
@@ -40,6 +42,30 @@ class FullFTManager:
         else:
             for acc in self.accumulators.values():
                 acc.zero_()
+        if self.store is not None:
+            self._register_streams()
+
+    def _register_streams(self) -> None:
+        for key in self.true_weights:
+            layer_id, name = key
+            self.store.register(Stream(
+                StreamKind.OPT_STATE, layer_id, f"{name}::exp_avg",
+                tuple(self.opt_states[key]["exp_avg"].shape),
+                self.opt_states[key]["exp_avg"].dtype,
+                source=lambda k=key: self.opt_states[k]["exp_avg"],
+            ))
+            self.store.register(Stream(
+                StreamKind.OPT_STATE, layer_id, f"{name}::exp_avg_sq",
+                tuple(self.opt_states[key]["exp_avg_sq"].shape),
+                self.opt_states[key]["exp_avg_sq"].dtype,
+                source=lambda k=key: self.opt_states[k]["exp_avg_sq"],
+            ))
+            self.store.register(Stream(
+                StreamKind.GRAD_ACC, layer_id, name,
+                tuple(self.accumulators[key].shape),
+                self.accumulators[key].dtype,
+                source=lambda k=key: self.accumulators[k],
+            ))
 
     def _choose_accum_backend(self) -> str:
         requested = self.config.grad_accum_backend

@@ -100,13 +100,11 @@ class LemaModel:
                 model_dtype = next(iter(sample.values())).dtype
             except: pass
 
-        # 5. Initialize LoRA Manager (or Full-FT Manager in selective_full mode)
+        # 5. Initialize LoRA Manager (full-FT manager is built after the store
+        #    so it can register its streams on it)
         self.full_ft_manager = None
         self.lora_manager = None
-        if config.training_mode == TrainingMode.SELECTIVE_FULL:
-            from ._full_ft import FullFTManager
-            self.full_ft_manager = FullFTManager(self.gbi, self.adapter, config)
-        else:
+        if config.training_mode != TrainingMode.SELECTIVE_FULL:
             self.lora_manager = LoRAManager({
                 "r": self.config.lora_rank,
                 "alpha": self.config.lora_alpha,
@@ -122,6 +120,12 @@ class LemaModel:
 
         # 7. Initialize TensorStore (unified stream registry + budget)
         self.store = self._build_store()
+
+        # 8. Full-FT Manager (registers its true weights/states/accumulators
+        #    as streams on the store)
+        if config.training_mode == TrainingMode.SELECTIVE_FULL:
+            from ._full_ft import FullFTManager
+            self.full_ft_manager = FullFTManager(self.gbi, self.adapter, config, store=self.store)
 
     def _build_store(self) -> TensorStore:
         store = TensorStore.with_budget(self.config)
