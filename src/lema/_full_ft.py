@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
+import numpy as np
 import torch
 
 from ._config import LemaConfig, TrainingMode
@@ -29,6 +31,67 @@ class FullFTManager:
         self.layer_steps: dict[int, int] = {}
         self._init_weights()
         self._init_module_name_map()
+        self.accumulator_backend = self._choose_accum_backend()
+        self._memmaps: dict[tuple[int, str], np.ndarray] = {}
+        self._memmap_files: dict[int, object] = {}
+        if self.accumulator_backend == "disk":
+            self._init_disk_accumulators()
+        else:
+            for acc in self.accumulators.values():
+                acc.zero_()
+
+    def _choose_accum_backend(self) -> str:
+        requested = self.config.grad_accum_backend
+        if requested == "disk":
+            return "disk"
+        if requested == "ram":
+            return "ram"
+        # auto: estimate fp32 accumulator bytes vs half the RAM budget
+        bytes_needed = self.total_selected_params() * 4
+        ram_budget = self.config.max_ram_gb
+        if ram_budget <= 0:
+            import psutil
+            ram_budget = psutil.virtual_memory().total / (1024**3) * 0.7
+        if bytes_needed > ram_budget * 0.5 * 1e9:
+            logger.info(f"LEMA: Accumulators ({bytes_needed/1e9:.1f} GB) exceed RAM budget — using disk backend")
+            return "disk"
+        return "ram"
+
+    def _init_disk_accumulators(self) -> None:
+        import os
+        dirpath = os.path.join(self.config.output_dir, "grad_accum")
+        os.makedirs(dirpath, exist_ok=True)
+        self._memmap_files = {}
+        self._memmaps = {}
+        for layer_id, keys in self.selected_layer_keys.items():
+            total = sum(self.get_accumulator(k).numel() for k in keys)
+            path = os.path.join(dirpath, f"grad_acc_{layer_id}.bin")
+            is_new = not os.path.exists(path)
+            f = open(path, "a+b")
+            if is_new:
+                f.truncate(total * 4)
+            self._memmap_files[layer_id] = f
+            arr = np.memmap(path, dtype="float32", mode="r+", shape=(total,))
+            if is_new:
+                arr.fill(0)
+            offset = 0
+            for key in keys:
+                n = self.get_accumulator(key).numel()
+                view = torch.from_numpy(arr[offset:offset + n]).view(self.get_accumulator(key).shape)
+                self.accumulators[key] = view
+                self._memmaps[key] = arr
+                offset += n
+
+    def close(self) -> None:
+        for f in self._memmap_files.values():
+            try:
+                f.flush()
+            except Exception:
+                pass
+        for layer_id, f in self._memmap_files.items():
+            f.close()
+        self._memmap_files = {}
+        self._memmaps = {}
 
     def _init_weights(self) -> None:
         dtype = self.config.dtype if isinstance(self.config.dtype, torch.dtype) else getattr(torch, self.config.dtype, torch.float32)
