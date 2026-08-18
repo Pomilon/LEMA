@@ -77,3 +77,6 @@ wandb/
 kaggle_status*.log
 results/
 *-metadata.json
+
+# Worktrees
+.worktrees/
