@@ -105,6 +105,10 @@ class MixtralAdapter(LemaModelAdapter):
                 for param, offset, numel, shape in mapping:
                     param.data.copy_(flat_buffer[offset:offset+numel].view(shape), non_blocking=True)
 
+        fm = getattr(self, "_full_ft_manager", None)
+        if fm is not None:
+            fm.apply_to_module(layer_id, module)
+
         return module
 
     def get_module_param_name(self, layer_id: int, full_param_name: str) -> str:

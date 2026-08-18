@@ -11,7 +11,7 @@ from transformers import AutoConfig
 from tqdm import tqdm
 from huggingface_hub import snapshot_download
 
-from ._config import LemaConfig, MemoryStrategy
+from ._config import LemaConfig, MemoryStrategy, TrainingMode
 from .adapters import get_adapter
 from ._gbi import GlobalBinaryIndex
 from ._lora import LoRAManager
@@ -99,12 +99,18 @@ class LemaModel:
                 model_dtype = next(iter(sample.values())).dtype
             except: pass
 
-        # 5. Initialize LoRA Manager with matching dtype
-        self.lora_manager = LoRAManager({
-            "r": self.config.lora_rank,
-            "alpha": self.config.lora_alpha,
-            "target_modules": self.config.lora_target_modules
-        }, device=self.config.device, dtype=model_dtype)
+        # 5. Initialize LoRA Manager (or Full-FT Manager in selective_full mode)
+        self.full_ft_manager = None
+        self.lora_manager = None
+        if config.training_mode == TrainingMode.SELECTIVE_FULL:
+            from ._full_ft import FullFTManager
+            self.full_ft_manager = FullFTManager(self.gbi, self.adapter, config)
+        else:
+            self.lora_manager = LoRAManager({
+                "r": self.config.lora_rank,
+                "alpha": self.config.lora_alpha,
+                "target_modules": self.config.lora_target_modules
+            }, device=self.config.device, dtype=model_dtype)
 
         # 6. Initialize Memory Manager
         self.memory = TripleBufferManager(
@@ -121,26 +127,37 @@ class LemaModel:
         model = cls(config)
 
         # Load adapters if they exist
-        if os.path.exists(os.path.join(path, "adapter_model.bin")):
+        if model.full_ft_manager is not None:
+            model.full_ft_manager.load_delta(path)
+            model.full_ft_manager.load_optimizer(path)
+        elif os.path.exists(os.path.join(path, "adapter_model.bin")):
             model.lora_manager.load_pretrained(path)
 
         return model
 
     def close(self):
         """Releases all resources: C++ backend, thread pool, RAM/VRAM buffers, file handles."""
+        if hasattr(self, "full_ft_manager") and self.full_ft_manager is not None:
+            self.full_ft_manager.close()
         if hasattr(self, "memory") and self.memory is not None:
             self.memory.close()
         if hasattr(self, "gbi") and self.gbi is not None:
             self.gbi.close()
 
     def save_pretrained(self, save_directory: str):
-        """Saves the configuration and LoRA adapters."""
+        """Saves the configuration and LoRA adapters (or full-FT delta)."""
         self.config.save_pretrained(save_directory)
-        self.lora_manager.save_pretrained(save_directory)
+        if self.full_ft_manager is not None:
+            self.full_ft_manager.save_delta(save_directory)
+        else:
+            self.lora_manager.save_pretrained(save_directory)
 
     def initialize_lora(self):
         """Pre-initializes LoRA adapters and warms the sliding-window pool.
         Creates 3 pool modules (emb, decoder, head) on CPU — first train_step moves to GPU."""
+        if self.full_ft_manager is not None:
+            logger.info("LEMA: Skipping LoRA init in selective_full mode")
+            return
         logger.info("LEMA: Pre-initializing LoRA adapters...")
         layers = self.adapter.get_layer_metadata()
         # Warm pool: one emb, one decoder, one head
@@ -150,6 +167,8 @@ class LemaModel:
         self.adapter.construct_layer_module(layers[-1]['id'], None, self.lora_manager)
 
     def get_trainable_parameters(self):
+        if self.full_ft_manager is not None:
+            return self.full_ft_manager.get_trainable_parameters()
         return self.lora_manager.get_trainable_parameters()
 
     def get_trainer(self, optimizer: torch.optim.Optimizer | None = None, **kwargs) -> Any:
@@ -158,8 +177,9 @@ class LemaModel:
         # Pop internal kwargs before passing to LemaTrainer
         auto_optimize = kwargs.pop("auto_optimize", False)
 
-        # Auto-optimize if limits are not set
-        if self.config.max_ram_gb <= 0 or auto_optimize:
+        # Auto-optimize if limits are not set (skipped in selective_full mode,
+        # where the dry-run's LoRA-oriented trainer does not apply)
+        if self.full_ft_manager is None and (self.config.max_ram_gb <= 0 or auto_optimize):
             self.simulate_and_optimize()
             # Re-init memory with optimized config
             self.memory = TripleBufferManager(self.gbi, self.adapter, config=self.config)
@@ -169,6 +189,7 @@ class LemaModel:
              model_adapter=self.adapter,
              gbi=self.gbi,
              lora_manager=self.lora_manager,
+             full_ft_manager=self.full_ft_manager,
              memory_manager=self.memory,
              optimizer=optimizer,
              **kwargs
@@ -304,6 +325,7 @@ class LemaModel:
 
     def to(self, device: str):
         self.config.device = device
-        self.lora_manager.device = device
+        if self.lora_manager is not None:
+            self.lora_manager.device = device
         self.memory.device = device
         return self

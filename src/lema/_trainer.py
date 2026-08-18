@@ -26,7 +26,8 @@ class LemaTrainer:
                  gbi: Any, 
                  lora_manager: Any = None, 
                  optimizer: torch.optim.Optimizer | None = None,
-                 memory_manager: TripleBufferManager | None = None):
+                 memory_manager: TripleBufferManager | None = None,
+                 full_ft_manager: Any = None):
         
         self.config = config
         self.adapter = model_adapter
@@ -42,6 +43,7 @@ class LemaTrainer:
         
         self.layers = self.adapter.get_layer_metadata()
         self.lora_manager = lora_manager
+        self.full_ft_manager = full_ft_manager
         self.optimizer = optimizer
         self.global_step = 0
         self.accumulation_step = 0
@@ -52,10 +54,14 @@ class LemaTrainer:
             self.memory.close()
 
     def save_checkpoint(self, save_directory: str):
-        """Saves the model state (config + LoRA) and optionally optimizer state."""
+        """Saves the model state (config + LoRA or full-FT delta) and optionally optimizer state."""
         os.makedirs(save_directory, exist_ok=True)
         self.config.save_pretrained(save_directory)
-        if self.lora_manager:
+        if self.full_ft_manager is not None:
+            self.full_ft_manager.save_delta(save_directory)
+            if self.config.save_optimizer:
+                self.full_ft_manager.save_optimizer(save_directory)
+        elif self.lora_manager:
             self.lora_manager.save_pretrained(save_directory)
         
         if self.optimizer:
@@ -94,6 +100,8 @@ class LemaTrainer:
                     if prefetch_idx < len(self.layers):
                         self.memory.prefetch_to_ram_async(self.layers[prefetch_idx]['id'], prefetch_idx % 2)
 
+                if self.full_ft_manager is not None:
+                    self.adapter._full_ft_manager = self.full_ft_manager
                 layer_module = self.adapter.construct_layer_module(layer_meta['id'], flat_vram, self.lora_manager)
 
                 # Save input for backward (detached from graph)
@@ -124,6 +132,8 @@ class LemaTrainer:
             prev_slot = (i - 1) % 2
 
             flat_vram = self.memory.get_vram_flat_buffer(slot)
+            if self.full_ft_manager is not None:
+                self.adapter._full_ft_manager = self.full_ft_manager
             layer_module = self.adapter.construct_layer_module(self.layers[i]['id'], flat_vram, self.lora_manager)
 
             if i - 1 >= 0:
@@ -151,14 +161,25 @@ class LemaTrainer:
                 loss.backward()
                 grad_output = layer_input.grad
             else:
-                (output[0] if isinstance(output, tuple) else output).backward(grad_output)
+                out = output[0] if isinstance(output, tuple) else output
+                if out.requires_grad:
+                    out.backward(grad_output)
                 grad_output = layer_input.grad
+
+            if self.full_ft_manager is not None:
+                self.full_ft_manager.accumulate_grads(i, layer_module)
 
             self.adapter.release_layer_module(layer_module)
             del layer_module
 
         self.accumulation_step += 1
-        if self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
+        if self.full_ft_manager is not None:
+            if self.accumulation_step % self.config.gradient_accumulation_steps == 0:
+                for layer_id in self.full_ft_manager.selected_layer_keys:
+                    self.full_ft_manager.clip_grad_norm_(layer_id, 1.0)
+                    self.full_ft_manager.step_layer(layer_id)
+                self.accumulation_step = 0
+        elif self.optimizer and (self.accumulation_step % self.config.gradient_accumulation_steps == 0):
             torch.nn.utils.clip_grad_norm_(self.lora_manager.get_trainable_parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()

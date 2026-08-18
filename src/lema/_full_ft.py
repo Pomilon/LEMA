@@ -244,3 +244,34 @@ class FullFTManager:
                 if shape is not None:
                     total += math.prod(shape)
         return total
+
+    def save_delta(self, save_directory: str) -> None:
+        import os
+        from safetensors.torch import save_file as st_save
+        tensors = {}
+        for key, w in self.true_weights.items():
+            _, name = key
+            tensors[name] = (w.float() - self.original[key].float()).contiguous()
+        st_save(tensors, os.path.join(save_directory, "delta.safetensors"))
+
+    def save_optimizer(self, save_directory: str) -> None:
+        import os
+        torch.save(self.layer_steps, os.path.join(save_directory, "layer_steps.bin"))
+
+    def load_delta(self, save_directory: str) -> None:
+        import os
+        from safetensors.torch import load_file
+        path = os.path.join(save_directory, "delta.safetensors")
+        if not os.path.exists(path):
+            return
+        delta = load_file(path)
+        for key, w in self.true_weights.items():
+            _, name = key
+            if name in delta:
+                w.copy_(self.original[key] + delta[name].to(w.dtype))
+
+    def load_optimizer(self, save_directory: str) -> None:
+        import os
+        path = os.path.join(save_directory, "layer_steps.bin")
+        if os.path.exists(path):
+            self.layer_steps = torch.load(path)
