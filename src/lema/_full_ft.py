@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import torch
+
 from ._config import LemaConfig, TrainingMode
 from ._utils._logger import logger
 
@@ -19,6 +21,101 @@ class FullFTManager:
         self.selected: dict[int, list[str]] = {}
         self.selected_layer_keys: dict[int, list[tuple[int, str]]] = {}
         self.resolve_selection()
+        self.module_name_to_key: dict[int, dict[str, tuple[int, str]]] = {}
+        self.true_weights: dict[tuple[int, str], torch.Tensor] = {}
+        self.original: dict[tuple[int, str], torch.Tensor] = {}
+        self.opt_states: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
+        self.accumulators: dict[tuple[int, str], torch.Tensor] = {}
+        self.layer_steps: dict[int, int] = {}
+        self._init_weights()
+        self._init_module_name_map()
+
+    def _init_weights(self) -> None:
+        dtype = self.config.dtype if isinstance(self.config.dtype, torch.dtype) else getattr(torch, self.config.dtype, torch.float32)
+        for layer_id, keys in self.selected_layer_keys.items():
+            for key in keys:
+                _, name = key
+                w = self.gbi.load_tensors([name], device="cpu")[name]
+                w = w.to(dtype).contiguous()
+                self.true_weights[key] = w
+                self.original[key] = w.clone()
+                self.opt_states[key] = {
+                    "exp_avg": torch.zeros_like(w, dtype=torch.float32),
+                    "exp_avg_sq": torch.zeros_like(w, dtype=torch.float32),
+                }
+                self.accumulators[key] = torch.zeros_like(w, dtype=torch.float32)
+
+    def _init_module_name_map(self) -> None:
+        for layer_id, keys in self.selected_layer_keys.items():
+            self.module_name_to_key[layer_id] = {}
+            for key in keys:
+                _, name = key
+                module_name = self.adapter.get_module_param_name(layer_id, name)
+                self.module_name_to_key[layer_id][module_name] = key
+
+    def get_opt_state(self, key: tuple[int, str]) -> dict[str, torch.Tensor]:
+        return self.opt_states[key]
+
+    def get_accumulator(self, key: tuple[int, str]) -> torch.Tensor:
+        return self.accumulators[key]
+
+    def apply_to_module(self, layer_id: int, module) -> None:
+        name_to_key = self.module_name_to_key.get(layer_id, {})
+        for name, param in module.named_parameters():
+            key = name_to_key.get(name)
+            if key is not None:
+                param.requires_grad_(True)
+                param.data.copy_(self.true_weights[key], non_blocking=True)
+            else:
+                param.requires_grad_(False)
+
+    def accumulate_grads(self, layer_id: int, module) -> None:
+        name_to_key = self.module_name_to_key.get(layer_id, {})
+        for name, param in module.named_parameters():
+            key = name_to_key.get(name)
+            if key is not None and param.grad is not None:
+                self.get_accumulator(key).add_(param.grad.float().to(self.accumulators[key].device))
+                param.grad = None
+
+    def clip_grad_norm_(self, layer_id: int, max_norm: float = 1.0) -> float:
+        keys = self.selected_layer_keys.get(layer_id, [])
+        total = sum(self.get_accumulator(k).float().pow(2).sum().item() for k in keys)
+        norm = math.sqrt(total)
+        if norm > max_norm and norm > 0:
+            coeff = max_norm / norm
+            for k in keys:
+                self.get_accumulator(k).mul_(coeff)
+        return norm
+
+    def step_layer(self, layer_id: int) -> None:
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        lr = self.config.learning_rate
+        wd = self.config.weight_decay
+        step = self.layer_steps.get(layer_id, 0) + 1
+        self.layer_steps[layer_id] = step
+        b1 = 1 - beta1 ** step
+        b2 = 1 - beta2 ** step
+        for name, key in self.module_name_to_key.get(layer_id, {}).items():
+            w = self.true_weights[key]
+            grad = self.get_accumulator(key)
+            state = self.get_opt_state(key)
+            w_dev = w.to(self.config.device).float()
+            g_dev = grad.to(self.config.device)
+            m = state["exp_avg"].to(self.config.device)
+            v = state["exp_avg_sq"].to(self.config.device)
+            if wd:
+                w_dev.mul_(1 - lr * wd)
+            m.mul_(beta1).add_(g_dev, alpha=1 - beta1)
+            v.mul_(beta2).addcmul_(g_dev, g_dev, value=1 - beta2)
+            denom = v.sqrt().div_(math.sqrt(b2)).add_(eps)
+            w_dev.addcdiv_(m, denom, value=-(lr / b1))
+            w.copy_(w_dev.to(w.dtype))
+            state["exp_avg"].copy_(m)
+            state["exp_avg_sq"].copy_(v)
+            self.get_accumulator(key).zero_()
+
+    def get_trainable_parameters(self) -> list[torch.Tensor]:
+        return list(self.true_weights.values())
 
     def _resolve_layers(self) -> list[int]:
         meta = self.adapter.get_layer_metadata()
