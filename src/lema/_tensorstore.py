@@ -537,7 +537,10 @@ class KVChunkStore:
             self._current_size[layer_id] = 0
 
     def num_chunks(self, layer_id: int) -> int:
-        return self._current.get(layer_id, 0) + (1 if self._current_size.get(layer_id, 0) > 0 else 0)
+        tracked = self._current.get(layer_id, 0) + (1 if self._current_size.get(layer_id, 0) > 0 else 0)
+        if tracked > 0:
+            return tracked
+        return max([c for (l, c) in self._sizes if l == layer_id] or [0]) + 1
 
     def current_size(self, layer_id: int) -> int:
         return self._current_size.get(layer_id, 0)
@@ -552,3 +555,31 @@ class KVChunkStore:
         self._files.clear()
         self._memmaps.clear()
         self._ram.clear()
+
+
+def chunked_attention(q: torch.Tensor, kv_chunks: list[tuple[torch.Tensor, torch.Tensor]],
+                      scale: float | None = None) -> torch.Tensor:
+    """Exact chunked attention over a list of (K, V) chunks.
+
+    q: (batch, heads, q_len, head_dim). Each chunk's K/V: (batch, heads, chunk_len, head_dim).
+    Builds the full score matrix from per-chunk matmuls concatenated along the
+    key dimension, then a single fp32 softmax and a single weighted sum against
+    the concatenated V. Mathematically identical to full-resident attention;
+    bit-exact against a reference built with the same per-chunk decomposition.
+
+    Causal masking is NOT applied here (callers apply it per query chunk).
+    """
+    if scale is None:
+        head_dim = q.size(-1)
+        scale = 1.0 / (head_dim ** 0.5)
+    qf = q.float()
+    scores_parts = []
+    for k, _ in kv_chunks:
+        scores_parts.append(qf @ k.float().transpose(-2, -1))
+    scores = torch.cat(scores_parts, dim=-1) * scale
+    m = scores.max(dim=-1, keepdim=True).values
+    p = (scores - m).exp()
+    v_full = torch.cat([v for _, v in kv_chunks], dim=2).float()
+    out = p @ v_full
+    denom = p.sum(dim=-1, keepdim=True)
+    return (out / denom).to(q.dtype)
