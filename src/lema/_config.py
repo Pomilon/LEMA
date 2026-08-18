@@ -10,6 +10,16 @@ class MemoryStrategy(Enum):
     RESIDENT = "resident"
 
 
+class TrainingMode(Enum):
+    LORA = "lora"
+    SELECTIVE_FULL = "selective_full"
+
+
+class StateStrategy(Enum):
+    STREAMING = "streaming"
+    VRAM = "vram"
+
+
 @dataclass
 class LemaConfig:
     model_name_or_path: str
@@ -34,6 +44,13 @@ class LemaConfig:
     output_dir: str = "output"
     dtype: str = "float16"
     attn_implementation: str = "eager"
+    training_mode: TrainingMode = TrainingMode.LORA
+    state_strategy: StateStrategy = StateStrategy.STREAMING
+    trainable_modules: list[str] = field(default_factory=list)
+    trainable_layers: list[str] = field(default_factory=list)
+    grad_accum_backend: str = "auto"
+    save_optimizer: bool = True
+    weight_decay: float = 0.01
 
     def __post_init__(self):
         if self.gbi_path is None:
@@ -43,6 +60,10 @@ class LemaConfig:
                 self.gbi_path = "model.safetensors"
         if isinstance(self.strategy, str):
             self.strategy = MemoryStrategy(self.strategy.lower())
+        if isinstance(self.training_mode, str):
+            self.training_mode = TrainingMode(self.training_mode.lower())
+        if isinstance(self.state_strategy, str):
+            self.state_strategy = StateStrategy(self.state_strategy.lower())
 
     def to_dict(self) -> dict[str, Any]:
         return {
