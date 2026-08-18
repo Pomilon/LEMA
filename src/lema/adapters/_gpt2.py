@@ -86,6 +86,17 @@ class GPT2Adapter(LemaModelAdapter):
 
         return module
 
+    def get_module_param_name(self, layer_id: int, full_param_name: str) -> str:
+        if layer_id == 0:
+            return "wte.weight" if "wte" in full_param_name else "wpe.weight"
+        elif layer_id == self.hf_config.n_layer + 1:
+            if "ln_f" in full_param_name:
+                return "ln_f.weight" if "weight" in full_param_name else "ln_f.bias"
+            return "head.weight"
+        else:
+            prefix = f"transformer.h.{layer_id - 1}."
+            return full_param_name[len(prefix):]
+
     def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         idx = layer_id - 1

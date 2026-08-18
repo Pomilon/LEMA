@@ -128,6 +128,15 @@ class Lfm2Adapter(LemaModelAdapter):
 
         return module
 
+    def get_module_param_name(self, layer_id: int, full_param_name: str) -> str:
+        if layer_id == 0:
+            return "embed_tokens.weight"
+        elif layer_id == self.hf_config.num_hidden_layers + 1:
+            return "embedding_norm.weight" if "embedding_norm" in full_param_name else "lm_head.weight"
+        else:
+            prefix = f"model.layers.{layer_id - 1}."
+            return full_param_name[len(prefix):]
+
     def _create_mapping(self, layer_id: int, module: nn.Module) -> list[tuple]:
         names = self.get_param_names_for_layer(layer_id)
         module_params = dict(module.named_parameters())

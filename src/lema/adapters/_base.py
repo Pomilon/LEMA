@@ -27,6 +27,9 @@ class LemaModelAdapter(ABC):
     @abstractmethod
     def get_param_names_for_layer(self, layer_id: int) -> list[str]: ...
 
+    @abstractmethod
+    def get_module_param_name(self, layer_id: int, full_param_name: str) -> str: ...
+
     @property
     @abstractmethod
     def hidden_size(self) -> int: ...
