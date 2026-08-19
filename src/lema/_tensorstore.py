@@ -483,6 +483,11 @@ class KVChunkStore:
     def stash(self, layer_id: int, chunk_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
         key = (layer_id, chunk_idx)
         self._sizes[key] = k.shape[2]
+        # If this chunk is full, the next append starts a fresh chunk (size 0);
+        # if partial, append continues growing it.
+        is_full = k.shape[2] >= self.kv_chunk_size
+        self._current[layer_id] = chunk_idx + 1 if is_full else chunk_idx
+        self._current_size[layer_id] = 0 if is_full else k.shape[2]
         if not self._use_disk():
             self._ram[key] = (k.to(self.device), v.to(self.device))
             return

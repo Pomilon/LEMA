@@ -183,11 +183,56 @@ class GPT2Adapter(LemaModelAdapter):
         hidden_states = residual + hidden_states
         return hidden_states
 
+    def decode_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                             kv_store, layer_id: int, kv_chunk_size: int = 8192,
+                             is_new_token: bool = True) -> torch.Tensor:
+        """Forward a single (new) token's hidden state through a GPT2Block using
+        the cached KV store. Attends over all cached chunks (causal trivially —
+        all cached keys precede the new token), then appends the new K/V."""
+        block = layer_module
+        head_dim = block.attn.head_dim
+        n_head = block.attn.num_heads
+
+        residual = hidden_states
+        h = block.ln_1(hidden_states)
+        qkv = block.attn.c_attn(h)
+        split = block.attn.split_size
+        q, k, v = qkv.split(split, dim=-1)
+        batch, tok, _ = q.shape
+
+        q = q.view(batch, tok, n_head, head_dim).transpose(1, 2)
+        k = k.view(batch, tok, n_head, head_dim).transpose(1, 2)
+        v = v.view(batch, tok, n_head, head_dim).transpose(1, 2)
+
+        scale = 1.0 / (head_dim ** 0.5) if block.attn.scale_attn_weights else 1.0
+
+        # append new K/V to the cache
+        if is_new_token:
+            kv_store.append(layer_id, k, v)
+
+        # attend over all cached chunks
+        num_c = kv_store.num_chunks(layer_id)
+        kv_chunks = [kv_store.load(layer_id, c) for c in range(num_c)]
+        dropout = block.attn.attn_dropout if block.attn.attn_dropout.p > 0 else None
+        attn_out = chunked_attention(q, kv_chunks, scale, causal=False, dropout=dropout)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(batch, tok, -1)
+        attn_out = block.attn.c_proj(attn_out)
+        hidden_states = attn_out + residual
+
+        residual = hidden_states
+        hidden_states = block.ln_2(hidden_states)
+        hidden_states = block.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
         kv_store = kwargs.get("kv_store")
         layer_id = kwargs.get("layer_id")
         kv_chunk_size = kwargs.get("kv_chunk_size", 0)
+        position_offset = kwargs.get("position_offset", 0)
+        if isinstance(layer_module, GPT2EmbeddingsLayer):
+            return layer_module(hidden_states, position_offset=position_offset)
         if isinstance(layer_module, GPT2Block) and kv_store is not None and kv_chunk_size > 0:
             if hidden_states.size(1) > kv_chunk_size:
                 return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
@@ -207,8 +252,9 @@ class GPT2EmbeddingsLayer(nn.Module):
         super().__init__()
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
-    def forward(self, input_ids):
-        position_ids = torch.arange(0, input_ids.size(-1), dtype=torch.long, device=input_ids.device).unsqueeze(0)
+    def forward(self, input_ids, position_offset: int = 0):
+        position_ids = torch.arange(position_offset, position_offset + input_ids.size(-1),
+                                    dtype=torch.long, device=input_ids.device).unsqueeze(0)
         return self.wte(input_ids) + self.wpe(position_ids)
 
 

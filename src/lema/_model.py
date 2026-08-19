@@ -339,6 +339,87 @@ class LemaModel:
 
         return tokenizer.decode(input_ids[0], skip_special_tokens=True)
 
+    @torch.no_grad()
+    def generate_kv(self,
+                    prompt: str,
+                    tokenizer: Any,
+                    max_new_tokens: int = 50,
+                    do_sample: bool = True,
+                    temperature: float = 0.7,
+                    kv_chunk_size: int | None = None):
+        """KV-cached generation: prefill stashes per-layer KV via chunked attention,
+        then each new token is decoded against the cache (no O(n^2) re-forward)."""
+        from ._tensorstore import KVChunkStore
+
+        if kv_chunk_size is None:
+            kv_chunk_size = self.config.kv_chunk_size
+        for attr in ['_cache_seq', '_cache_pos', '_cache_mask', '_cache_rope']:
+            if hasattr(self.adapter, attr):
+                delattr(self.adapter, attr)
+        trainer = self.get_trainer(None)
+
+        inputs = tokenizer(prompt, return_tensors="pt").to(self.config.device)
+        input_ids = inputs["input_ids"]
+        kv_store = KVChunkStore(kv_chunk_size=kv_chunk_size, device=self.config.device)
+
+        def prefill(ids):
+            hidden = self.adapter.forward_layer(self._emb_module(), ids)
+            layers = self.adapter.get_layer_metadata()
+            for meta in layers[1:-1]:
+                block = self.adapter.construct_layer_module(
+                    meta['id'], self._layer_flat(meta['id']), self.lora_manager, self.full_ft_manager)
+                hidden = self.adapter.forward_layer(
+                    block, hidden, kv_store=kv_store, layer_id=meta['id'], kv_chunk_size=kv_chunk_size)
+                self.adapter.release_layer_module(block)
+            return self.adapter.forward_layer(
+                self._head_module(), hidden, kv_store=kv_store, layer_id=layers[-1]['id'],
+                kv_chunk_size=kv_chunk_size)
+
+        def decode_one(ids):
+            pos = ids.size(1) - 1
+            hidden = self.adapter.forward_layer(self._emb_module(), ids[:, -1:], position_offset=pos)
+            layers = self.adapter.get_layer_metadata()
+            for meta in layers[1:-1]:
+                block = self.adapter.construct_layer_module(
+                    meta['id'], self._layer_flat(meta['id']), self.lora_manager, self.full_ft_manager)
+                hidden = self.adapter.decode_forward_layer(
+                    block, hidden, kv_store, layer_id=meta['id'], kv_chunk_size=kv_chunk_size,
+                    is_new_token=True)
+                self.adapter.release_layer_module(block)
+            return self.adapter.forward_layer(self._head_module(), hidden)
+
+        logits = prefill(input_ids)
+        for _ in range(max_new_tokens):
+            next_token_logits = logits[:, -1, :]
+            if do_sample:
+                probs = torch.nn.functional.softmax(next_token_logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+            logits = decode_one(input_ids)
+        return tokenizer.decode(input_ids[0], skip_special_tokens=True)
+
+    def _emb_module(self):
+        layers = self.adapter.get_layer_metadata()
+        return self.adapter.construct_layer_module(layers[0]['id'], self._layer_flat(0), self.lora_manager)
+
+    def _head_module(self):
+        layers = self.adapter.get_layer_metadata()
+        return self.adapter.construct_layer_module(layers[-1]['id'], self._layer_flat(layers[-1]['id']), self.lora_manager)
+
+    def _layer_flat(self, layer_id: int):
+        if self.store is not None and self.store.transfer is not None:
+            transfer = self.store.transfer
+            # stream this layer's weights into a VRAM slot via the transfer engine
+            slot = (layer_id - 1) % 2
+            transfer.prefetch_to_ram(layer_id, slot=slot)
+            transfer.async_transfer_to_vram(layer_id, vram_slot=slot, ram_slot=slot)
+            return transfer.get_vram_flat_buffer(slot)
+        return None
+
     def to(self, device: str):
         self.config.device = device
         if self.lora_manager is not None:
