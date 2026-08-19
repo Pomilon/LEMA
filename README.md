@@ -136,7 +136,13 @@ config = LemaConfig(
 model.generate_kv(prompt, tokenizer, max_new_tokens=200, kv_chunk_size=8192)
 ```
 
+Chunked attention and KV-cached generation are supported on **all adapters**: GPT-2, Llama, Mistral, Mixtral, and LFM2 (MoE). Generation runs in eval mode so outputs are deterministic.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) for the full design and T4 validation.
+
+## Next: Quantization
+
+Quantization support is the next planned milestone: quantized weight streaming (e.g. 4/8-bit) through the TensorStore to further cut VRAM and RAM for large models, plus quantized full-FT states. Stay tuned.
 
 ## Documentation
 

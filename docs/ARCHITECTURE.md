@@ -85,3 +85,9 @@ Every tensor LEMA moves — weights, optimizer states, gradient accumulators, an
 **Per-kind budgets.** VRAM is split by kind (`weights_vram`, `opt_state_vram`, `grad_acc_vram`, `kv_vram`), each `"auto"` (equal share), a fraction of `max_vram_gb`, or an absolute `"4.0GB"`. The `BudgetEngine` (src/lema/_budget_engine.py) proposes a split — by default maximizing throughput, or minimizing residency to hit a `target_step_time_ms` — and explicit per-kind settings override its proposal. `tune_budgets()` runs the flight-check (disk/PCIe/compute benchmarks) and applies the report.
 
 **KV / long context.** `KVChunkStore` addresses the cache as `(layer_id, chunk_idx)`, RAM primary with mmap disk fallback. When `seq_len > kv_chunk_size`, the adapter's chunked forward splits the sequence into query chunks, stashes each chunk's K/V into the store, and computes exact causal attention chunk-by-chunk (per-chunk matmul + concat + single fp32 softmax — bit-exact vs a same-way reference, `allclose` ~1e-7 vs plain full attention). `generate_kv` prefills through the chunked path, then decodes one token per step against the streamed cache (appending via chunk rollover), replacing the O(n²) full re-forward with a true KV cache.
+
+### Chunked attention across adapters
+
+The chunked forward (`chunked_forward_layer`) and KV decode (`decode_forward_layer`) paths are implemented for **every adapter**: GPT-2 (learned positional embeddings), Llama/Mistral/Mixtral (RoPE + GQA via the shared `_chunked_rope.py` helper), and LFM2 (MoE, `q_layernorm`/`k_layernorm`/`out_proj`, full-attention layers). RoPE adapters apply rotary embeddings at absolute positions in decode; GQA KV is expanded to full heads before stashing. Generation runs in eval mode (dropout off) so cached decode is deterministic.
+
+**Next: quantization** — 4/8-bit weight streaming through the TensorStore plus quantized full-FT states, targeting further VRAM/RAM reduction for large models.
