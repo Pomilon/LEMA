@@ -81,8 +81,7 @@ class Lfm2Adapter(LemaModelAdapter):
             return self._layer_param_names(layer_id - 1)
         elif layer_id == self.hf_config.num_hidden_layers + 1:
             names = ['model.embedding_norm.weight']
-            if not self.hf_config.tie_word_embeddings:
-                names.append('lm_head.weight')
+            names.append('lm_head.weight')
             return names
         return []
 
