@@ -77,3 +77,11 @@ Checkpoints store `updated − original` for each selected tensor in **fp32** (`
 -   **System RAM**: 
     -   **STREAMING Mode**: ~2.5 GB (Pinned buffers).
     -   **RESIDENT Mode**: Requires space equal to the model size.
+
+## TensorStore: Unified Streaming Core
+
+Every tensor LEMA moves — weights, optimizer states, gradient accumulators, and KV chunks — is a **stream** registered in one `TensorStore` (src/lema/_tensorstore.py): an identity `(kind, layer_id, key)` with a residency policy, a VRAM slot pool, pinned RAM buffers, and mmap disk backing. The former `TripleBufferManager` transfer pipeline (disk → pinned RAM → double-buffered VRAM slots, CPP backend) is now the store's `_TransferEngine`, owned as the WEIGHTS policy's transport.
+
+**Per-kind budgets.** VRAM is split by kind (`weights_vram`, `opt_state_vram`, `grad_acc_vram`, `kv_vram`), each `"auto"` (equal share), a fraction of `max_vram_gb`, or an absolute `"4.0GB"`. The `BudgetEngine` (src/lema/_budget_engine.py) proposes a split — by default maximizing throughput, or minimizing residency to hit a `target_step_time_ms` — and explicit per-kind settings override its proposal. `tune_budgets()` runs the flight-check (disk/PCIe/compute benchmarks) and applies the report.
+
+**KV / long context.** `KVChunkStore` addresses the cache as `(layer_id, chunk_idx)`, RAM primary with mmap disk fallback. When `seq_len > kv_chunk_size`, the adapter's chunked forward splits the sequence into query chunks, stashes each chunk's K/V into the store, and computes exact causal attention chunk-by-chunk (per-chunk matmul + concat + single fp32 softmax — bit-exact vs a same-way reference, `allclose` ~1e-7 vs plain full attention). `generate_kv` prefills through the chunked path, then decodes one token per step against the streamed cache (appending via chunk rollover), replacing the O(n²) full re-forward with a true KV cache.

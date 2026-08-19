@@ -115,6 +115,29 @@ from lema._utils._conversion import merge_delta
 merge_delta(base_safetensors, "checkpoints/checkpoint-500/delta.safetensors", "merged.safetensors")
 ```
 
+## TensorStore: Unified Streaming Core
+
+All streaming — weights, optimizer states, gradient accumulators, and the KV cache — runs through one `TensorStore`: a slot-pool address space of tensor streams, each with a configurable residency policy. VRAM is split per-kind by a target-based `BudgetEngine` (tuner proposes, explicit overrides win), so you control how much of each kind stays in VRAM vs RAM vs disk.
+
+```python
+config = LemaConfig(
+    model_name_or_path="gpt2",
+    strategy=MemoryStrategy.STREAMING,
+    weights_vram="auto",      # "auto" | fraction e.g. "0.3" | absolute e.g. "4.0GB"
+    kv_vram="2.0GB",
+    target_step_time_ms=250,  # budget engine minimizes VRAM to meet this
+    kv_chunk_size=8192,       # tokens per KV chunk
+)
+```
+
+**Long context & KV-cached generation:** when the sequence exceeds one KV chunk, attention runs chunk-by-chunk (exact, fp32 online softmax) with KV streamed per-layer through the store — enabling 128k+ context on consumer VRAM. `generate_kv` uses a real KV cache instead of the O(n²) re-forward loop:
+
+```python
+model.generate_kv(prompt, tokenizer, max_new_tokens=200, kv_chunk_size=8192)
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) for the full design and T4 validation.
+
 ## Documentation
 
 - [**Benchmark Results**](docs/BENCHMARK_RESULTS.md): Full VRAM and throughput comparison.

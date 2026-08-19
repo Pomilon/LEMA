@@ -136,3 +136,17 @@ Selection: q/k/v/o projections of the last 4 decoder layers (37.7M params, ~3.4%
 Other verified full-FT modes (tiny GPT-2, CUDA): whole-model (LOMO-style), emb/head-only, disk gradient-accumulation backend, gradient-accumulation boundaries (`accum_steps=2` steps only at the boundary), and checkpoint → `merge_delta` → restore → resume.
 
 The full-FT selection triple (`trainable_modules` × `trainable_layers`) supports arbitrary subsets up to whole-model fine-tuning; VRAM stays at the single-layer working set while RAM scales with the selected parameter count.
+
+## TensorStore Umbrella (T4)
+
+The unified streaming core: weights, optimizer states, gradient accumulators, and KV chunks all live in one `TensorStore` with per-kind VRAM budgets (tuner proposes, explicit overrides win) and a target-based `BudgetEngine`. Verified in the Kaggle notebook's TensorStore demo cell on a T4 (seq=64 > one 16-token KV chunk).
+
+| Check | Result |
+|---|---|
+| Chunked attention (32 keys, 8/chunk) vs full | max diff **1.79e-07** (exact) |
+| Chunked long-context forward (GPT-2, seq=64) vs full | max diff **1.19e-07** (exact) |
+| KV-cached generation vs old O(n²) re-forward | identical token output |
+| Budget tuning | per-kind VRAM: weights/kv/opt/grad = 2.0 GB each (8 GB budget), target met |
+| Full unit suite | 76/76 passing (local + Kaggle) |
+
+KV-cached generation (`generate_kv`) streams per-layer KV chunks through the store, enabling long-context inference without holding the full KV cache in VRAM; chunked attention is exact (online softmax in fp32), not an approximation.
