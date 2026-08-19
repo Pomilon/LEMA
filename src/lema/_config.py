@@ -71,6 +71,29 @@ class LemaConfig:
             self.training_mode = TrainingMode(self.training_mode.lower())
         if isinstance(self.state_strategy, str):
             self.state_strategy = StateStrategy(self.state_strategy.lower())
+        self._validate_full_ft()
+
+    def _validate_full_ft(self):
+        if self.grad_accum_backend not in ("auto", "ram", "disk"):
+            raise ValueError(
+                f"Invalid grad_accum_backend: {self.grad_accum_backend!r}. "
+                "Choose 'auto', 'ram', or 'disk'."
+            )
+        for spec in self.trainable_layers:
+            if spec.startswith("last:"):
+                k = int(spec.split(":", 1)[1])
+                if k <= 0:
+                    raise ValueError(
+                        f"Invalid trainable_layers spec {spec!r}: 'last:K' requires K >= 1 "
+                        "(K=0 silently selects the whole model)."
+                    )
+            elif spec.startswith("first:"):
+                k = int(spec.split(":", 1)[1])
+                if k <= 0:
+                    raise ValueError(
+                        f"Invalid trainable_layers spec {spec!r}: 'first:K' requires K >= 1 "
+                        "(K<=0 silently selects nothing or the whole model)."
+                    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
