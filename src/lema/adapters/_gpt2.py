@@ -88,6 +88,8 @@ class GPT2Adapter(LemaModelAdapter):
         if full_ft_manager is not None:
             full_ft_manager.apply_to_module(layer_id, module)
 
+        if self._is_generation_mode():
+            module.eval()
         return module
 
     def get_module_param_name(self, layer_id: int, full_param_name: str) -> str:
@@ -185,7 +187,7 @@ class GPT2Adapter(LemaModelAdapter):
 
     def decode_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
                              kv_store, layer_id: int, kv_chunk_size: int = 8192,
-                             is_new_token: bool = True) -> torch.Tensor:
+                             position: int = 0, is_new_token: bool = True) -> torch.Tensor:
         """Forward a single (new) token's hidden state through a GPT2Block using
         the cached KV store. Attends over all cached chunks (causal trivially —
         all cached keys precede the new token), then appends the new K/V."""
@@ -234,10 +236,8 @@ class GPT2Adapter(LemaModelAdapter):
         if isinstance(layer_module, GPT2EmbeddingsLayer):
             return layer_module(hidden_states, position_offset=position_offset)
         if isinstance(layer_module, GPT2Block) and kv_store is not None and kv_chunk_size > 0:
-            if hidden_states.size(1) > kv_chunk_size:
-                return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
-                                                  layer_id, kv_chunk_size)
-            return layer_module(hidden_states)[0]
+            return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
+                                              layer_id, kv_chunk_size)
         if isinstance(layer_module, GPT2Block):
             return layer_module(hidden_states)[0]
         return layer_module(hidden_states)

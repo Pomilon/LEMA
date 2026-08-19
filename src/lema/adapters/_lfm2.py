@@ -129,6 +129,8 @@ class Lfm2Adapter(LemaModelAdapter):
         if full_ft_manager is not None:
             full_ft_manager.apply_to_module(layer_id, module)
 
+        if self._is_generation_mode():
+            module.eval()
         return module
 
     def get_module_param_name(self, layer_id: int, full_param_name: str) -> str:
@@ -218,7 +220,7 @@ class Lfm2Adapter(LemaModelAdapter):
         layer_id = kwargs.get("layer_id")
         kv_chunk_size = kwargs.get("kv_chunk_size", 0)
         if isinstance(layer_module, Lfm2MoeDecoderLayer):
-            if kv_store is not None and kv_chunk_size > 0 and hidden_states.size(1) > kv_chunk_size:
+            if kv_store is not None and kv_chunk_size > 0:
                 return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
                                                   layer_id, kv_chunk_size)
         if not isinstance(layer_module, Lfm2MoeDecoderLayer):

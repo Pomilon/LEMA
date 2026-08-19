@@ -65,6 +65,30 @@ def test_chunked_forward_matches_full(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind", ["llama", "mistral", "mixtral"])
+def test_generate_kv_matches_old_greedy(tmp_path, kind):
+    model = _build(tmp_path, kind)
+
+    class Tok:
+        eos_token_id = 2
+        def __call__(self, prompt, return_tensors="pt"):
+            ids = torch.tensor([[1, 3, 5, 7]])
+            class _W(dict):
+                def to(self, device):
+                    self["input_ids"] = self["input_ids"].to(device)
+                    return self
+            return _W(input_ids=ids)
+        def decode(self, ids, skip_special_tokens=True):
+            return ",".join(str(int(x)) for x in ids.tolist())
+
+    tok = Tok()
+    torch.manual_seed(1)
+    out_old = model.generate("x", tok, max_new_tokens=8, do_sample=False)
+    torch.manual_seed(1)
+    out_kv = model.generate_kv("x", tok, max_new_tokens=8, do_sample=False, kv_chunk_size=4)
+    assert out_old == out_kv, f"{kind}: old={out_old} kv={out_kv}"
+
+
+@pytest.mark.parametrize("kind", ["llama", "mistral", "mixtral"])
 def test_decode_matches_chunked_last_token(tmp_path, kind):
     model = _build(tmp_path, kind)
     ad = model.adapter

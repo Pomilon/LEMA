@@ -33,3 +33,16 @@ class LemaModelAdapter(ABC):
     @property
     @abstractmethod
     def hidden_size(self) -> int: ...
+
+    def _set_generation_mode(self) -> None:
+        """Put pooled layer modules into eval mode (disables dropout) for
+        deterministic generation. Adapters that create fresh modules per call
+        also check `self._generation_mode` in construct_layer_module."""
+        self._generation_mode = True
+        pool = getattr(self, "module_pool", None)
+        if pool:
+            for m in pool:
+                m.eval()
+
+    def _is_generation_mode(self) -> bool:
+        return bool(getattr(self, "_generation_mode", False))

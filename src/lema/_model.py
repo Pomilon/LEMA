@@ -391,6 +391,7 @@ class LemaModel:
             if hasattr(self.adapter, attr):
                 delattr(self.adapter, attr)
         trainer = self.get_trainer(None)
+        self.adapter._set_generation_mode() if hasattr(self.adapter, "_set_generation_mode") else None
 
         inputs = tokenizer(prompt, return_tensors="pt").to(self.config.device)
         input_ids = inputs["input_ids"]
@@ -432,6 +433,7 @@ class LemaModel:
             if hasattr(self.adapter, attr):
                 delattr(self.adapter, attr)
         trainer = self.get_trainer(None)
+        self.adapter._set_generation_mode() if hasattr(self.adapter, "_set_generation_mode") else None
 
         inputs = tokenizer(prompt, return_tensors="pt").to(self.config.device)
         input_ids = inputs["input_ids"]
@@ -459,7 +461,7 @@ class LemaModel:
                     meta['id'], self._layer_flat(meta['id']), self.lora_manager, self.full_ft_manager)
                 hidden = self.adapter.decode_forward_layer(
                     block, hidden, kv_store, layer_id=meta['id'], kv_chunk_size=kv_chunk_size,
-                    is_new_token=True)
+                    position=pos, is_new_token=True)
                 self.adapter.release_layer_module(block)
             return self.adapter.forward_layer(self._head_module(), hidden)
 
