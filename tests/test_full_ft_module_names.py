@@ -106,5 +106,7 @@ def test_lfm2_mapping():
     ]
     for layer_id, full, module in cases:
         assert a.get_module_param_name(layer_id, full) == module
-    # lfm2 defaults to tie_word_embeddings=True -> lm_head is not selected separately
-    assert "lm_head.weight" not in a.get_param_names_for_layer(3)
+    # lfm2 defaults to tie_word_embeddings=True, but lm_head.weight is still
+    # listed (the file stores a tied copy) so the head module loads it instead
+    # of staying at random init
+    assert "lm_head.weight" in a.get_param_names_for_layer(3)
