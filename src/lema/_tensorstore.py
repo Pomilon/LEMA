@@ -558,16 +558,22 @@ class KVChunkStore:
 
 
 def chunked_attention(q: torch.Tensor, kv_chunks: list[tuple[torch.Tensor, torch.Tensor]],
-                      scale: float | None = None) -> torch.Tensor:
+                      scale: float | None = None, query_start: int = 0,
+                      kv_chunk_size: int | None = None, causal: bool = False,
+                      dropout=None) -> torch.Tensor:
     """Exact chunked attention over a list of (K, V) chunks.
 
     q: (batch, heads, q_len, head_dim). Each chunk's K/V: (batch, heads, chunk_len, head_dim).
+    Chunk c covers global key positions [c*kv_chunk_size, (c+1)*kv_chunk_size).
     Builds the full score matrix from per-chunk matmuls concatenated along the
     key dimension, then a single fp32 softmax and a single weighted sum against
     the concatenated V. Mathematically identical to full-resident attention;
     bit-exact against a reference built with the same per-chunk decomposition.
 
-    Causal masking is NOT applied here (callers apply it per query chunk).
+    When causal=True, keys at positions strictly after each query position are
+    masked to -inf (query positions start at query_start in global key space).
+    dropout: an optional nn.Dropout applied to the normalized attention weights
+    (replicates the module's attn_dropout in training mode).
     """
     if scale is None:
         head_dim = q.size(-1)
@@ -577,9 +583,21 @@ def chunked_attention(q: torch.Tensor, kv_chunks: list[tuple[torch.Tensor, torch
     for k, _ in kv_chunks:
         scores_parts.append(qf @ k.float().transpose(-2, -1))
     scores = torch.cat(scores_parts, dim=-1) * scale
+    if causal:
+        if kv_chunk_size is None:
+            raise ValueError("kv_chunk_size is required when causal=True")
+        q_pos = torch.arange(query_start, query_start + q.size(-2), device=q.device)
+        k_len = scores.size(-1)
+        k_pos = torch.arange(0, k_len, device=q.device)
+        causal_mask = q_pos[:, None] < k_pos[None, :]  # (q_len, k_len)
+        mask_value = torch.finfo(scores.dtype).min
+        scores = torch.where(causal_mask[None, None], torch.full_like(scores, mask_value), scores)
     m = scores.max(dim=-1, keepdim=True).values
     p = (scores - m).exp()
+    denom = p.sum(dim=-1, keepdim=True)
+    p = p / denom
+    if dropout is not None:
+        p = dropout(p)
     v_full = torch.cat([v for _, v in kv_chunks], dim=2).float()
     out = p @ v_full
-    denom = p.sum(dim=-1, keepdim=True)
-    return (out / denom).to(q.dtype)
+    return out.to(q.dtype)

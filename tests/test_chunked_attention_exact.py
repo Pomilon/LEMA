@@ -17,15 +17,16 @@ def _split(k, v, chunk_size):
 
 
 def _reference(q, kv_chunks, scale):
-    """Reference built the SAME way as chunked_attention (per-chunk matmul + concat)."""
+    """Reference built the SAME way as chunked_attention (per-chunk matmul + concat,
+    normalize p before the matmul so the arithmetic order is identical)."""
     qf = q.float()
     scores = torch.cat([qf @ k.float().transpose(-2, -1) for k, _ in kv_chunks], dim=-1) * scale
     m = scores.max(dim=-1, keepdim=True).values
     p = (scores - m).exp()
+    p = p / p.sum(dim=-1, keepdim=True)
     v_full = torch.cat([v for _, v in kv_chunks], dim=2).float()
     out = p @ v_full
-    return (out / p.sum(dim=-1, keepdim=True)).to(q.dtype)
-
+    return out.to(q.dtype)
 
 def test_chunked_attention_bit_exact_vs_same_way_reference():
     q, k, v = _make()
@@ -57,6 +58,24 @@ def test_chunked_attention_fp16_close_to_reference():
     out = chunked_attention(q, chunks, scale)
     ref = _reference(q, chunks, scale)
     assert torch.allclose(out.float(), ref.float(), atol=1e-3, rtol=1e-3)
+
+
+def test_chunked_attention_causal_matches_full():
+    q, k, v = _make()
+    scale = 1.0 / (q.size(-1) ** 0.5)
+    q_full = q[:, :, :8]
+    chunks = _split(k, v, 4)
+    out = chunked_attention(q_full, chunks, scale, query_start=0, kv_chunk_size=4, causal=True)
+    # reference: full causal attention over all 16 keys, first 8 queries
+    scores = (q_full.float() @ k.float().transpose(-2, -1)) * scale
+    q_pos = torch.arange(0, 8)
+    k_pos = torch.arange(0, 16)
+    mask = q_pos[:, None] < k_pos[None, :]
+    scores = torch.where(mask[None, None], torch.full_like(scores, torch.finfo(scores.dtype).min), scores)
+    m = scores.max(dim=-1, keepdim=True).values
+    p = (scores - m).exp()
+    ref = (p @ v.float()) / p.sum(dim=-1, keepdim=True)
+    assert torch.allclose(out.float(), ref.float(), atol=1e-5, rtol=1e-5)
 
 
 def test_chunked_attention_via_kv_store():

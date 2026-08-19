@@ -6,6 +6,7 @@ from transformers.models.gpt2.modeling_gpt2 import GPT2Block, GPT2Config
 from typing import Any
 
 from ._base import LemaModelAdapter
+from .._tensorstore import chunked_attention
 
 
 class GPT2Adapter(LemaModelAdapter):
@@ -126,8 +127,72 @@ class GPT2Adapter(LemaModelAdapter):
     def release_layer_module(self, module: nn.Module):
         self.param_mappings.pop(id(module), None)
 
+    def chunked_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                              kv_store, layer_id: int, kv_chunk_size: int = 8192) -> torch.Tensor:
+        """Forward a GPT2Block using chunked causal attention over a KV store.
+
+        Reuses the module's own projections (ln_1, c_attn, c_proj, ln_2, mlp) so
+        weights are shared with the resident module; only the attention softmax
+        is computed chunk-by-chunk over stashed KV. Produces output that matches
+        the module's full forward within fp32 tolerance (mathematically identical).
+        """
+        block = layer_module
+        head_dim = block.attn.head_dim
+        n_head = block.attn.num_heads
+
+        residual = hidden_states
+        h = block.ln_1(hidden_states)
+        qkv = block.attn.c_attn(h)
+        split = block.attn.split_size
+        q, k, v = qkv.split(split, dim=-1)
+        batch, seq, _ = q.shape
+
+        q = q.view(batch, seq, n_head, head_dim).transpose(1, 2)
+        k = k.view(batch, seq, n_head, head_dim).transpose(1, 2)
+        v = v.view(batch, seq, n_head, head_dim).transpose(1, 2)
+
+        scale = 1.0 / (head_dim ** 0.5) if block.attn.scale_attn_weights else 1.0
+
+        # stash KV chunk-by-chunk
+        chunks_in_seq = (seq + kv_chunk_size - 1) // kv_chunk_size
+        attn_parts = []
+        for c in range(chunks_in_seq):
+            s = c * kv_chunk_size
+            e = min(s + kv_chunk_size, seq)
+            kv_store.stash(layer_id, c, k[:, :, s:e].contiguous(), v[:, :, s:e].contiguous())
+
+        dropout = block.attn.attn_dropout if block.attn.attn_dropout.p > 0 else None
+
+        # query chunk by chunk, attend over all prior + current chunks (causal)
+        for c in range(chunks_in_seq):
+            s = c * kv_chunk_size
+            e = min(s + kv_chunk_size, seq)
+            q_chunk = q[:, :, s:e]
+            kv_chunks = [kv_store.load(layer_id, cc) for cc in range(c + 1)]
+            attn_part = chunked_attention(q_chunk, kv_chunks, scale,
+                                          query_start=s, kv_chunk_size=kv_chunk_size,
+                                          causal=True, dropout=dropout)
+            attn_parts.append(attn_part)
+        attn_out = torch.cat(attn_parts, dim=2).transpose(1, 2).contiguous().view(batch, seq, -1)
+        attn_out = block.attn.c_proj(attn_out)
+        hidden_states = attn_out + residual
+
+        residual = hidden_states
+        hidden_states = block.ln_2(hidden_states)
+        hidden_states = block.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
+        kv_store = kwargs.get("kv_store")
+        layer_id = kwargs.get("layer_id")
+        kv_chunk_size = kwargs.get("kv_chunk_size", 0)
+        if isinstance(layer_module, GPT2Block) and kv_store is not None and kv_chunk_size > 0:
+            if hidden_states.size(1) > kv_chunk_size:
+                return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
+                                                  layer_id, kv_chunk_size)
+            return layer_module(hidden_states)[0]
         if isinstance(layer_module, GPT2Block):
             return layer_module(hidden_states)[0]
         return layer_module(hidden_states)
