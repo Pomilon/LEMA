@@ -163,3 +163,90 @@ def rope_decode_forward_layer(layer_module: nn.Module, hidden_states: torch.Tens
     hidden_states = block.mlp(hidden_states)
     hidden_states = residual + hidden_states
     return hidden_states
+
+
+def _lfm2_qkv_proj(attn, hidden_states: torch.Tensor):
+    """LFM2 attention projections with q/k layernorms, RoPE applied."""
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, attn.head_dim)
+    q = attn.q_layernorm(attn.q_proj(hidden_states).view(*hidden_shape)).transpose(1, 2)
+    k = attn.k_layernorm(attn.k_proj(hidden_states).view(*hidden_shape)).transpose(1, 2)
+    v = attn.v_proj(hidden_states).view(*hidden_shape).transpose(1, 2)
+    return q, k, v
+
+
+def lfm2_chunked_forward_layer(layer_module: nn.Module, hidden_states: torch.Tensor,
+                               kv_store: KVChunkStore, layer_id: int,
+                               kv_chunk_size: int, cos, sin) -> torch.Tensor:
+    """Chunked causal forward for LFM2 full_attention layers."""
+    block = layer_module
+    attn = block.self_attn
+    n_rep = attn.num_key_value_groups
+
+    residual = hidden_states
+    h = block.operator_norm(hidden_states)
+    q, k, v = _lfm2_qkv_proj(attn, h)
+    q, k = _rope_apply(q, k, cos, sin)
+
+    k = _repeat_kv(k, n_rep)
+    v = _repeat_kv(v, n_rep)
+
+    batch, _, seq, _ = q.shape
+    scale = attn.scaling
+    chunks_in_seq = (seq + kv_chunk_size - 1) // kv_chunk_size
+
+    for c in range(chunks_in_seq):
+        s = c * kv_chunk_size
+        e = min(s + kv_chunk_size, seq)
+        kv_store.stash(layer_id, c, k[:, :, s:e].contiguous(), v[:, :, s:e].contiguous())
+
+    attn_parts = []
+    for c in range(chunks_in_seq):
+        s = c * kv_chunk_size
+        e = min(s + kv_chunk_size, seq)
+        q_chunk = q[:, :, s:e]
+        kv_chunks = [kv_store.load(layer_id, cc) for cc in range(c + 1)]
+        attn_parts.append(chunked_attention(q_chunk, kv_chunks, scale,
+                                            query_start=s, kv_chunk_size=kv_chunk_size,
+                                            causal=True))
+    attn_out = torch.cat(attn_parts, dim=2).transpose(1, 2).contiguous()
+    attn_out = attn_out.view(batch, seq, -1)
+    attn_out = attn.out_proj(attn_out)
+
+    hidden_states = residual + attn_out
+    hidden_states = hidden_states + block.feed_forward(block.ffn_norm(hidden_states))
+    return hidden_states
+
+
+def lfm2_decode_forward_layer(layer_module: nn.Module, hidden_states: torch.Tensor,
+                              kv_store: KVChunkStore, layer_id: int,
+                              kv_chunk_size: int, cos, sin,
+                              is_new_token: bool = True) -> torch.Tensor:
+    """Decode one new token against cached KV for LFM2 full_attention layers."""
+    block = layer_module
+    attn = block.self_attn
+    n_rep = attn.num_key_value_groups
+
+    residual = hidden_states
+    h = block.operator_norm(hidden_states)
+    q, k, v = _lfm2_qkv_proj(attn, h)
+    q, k = _rope_apply(q, k, cos, sin)
+
+    k = _repeat_kv(k, n_rep)
+    v = _repeat_kv(v, n_rep)
+
+    batch, _, tok, _ = q.shape
+    scale = attn.scaling
+
+    if is_new_token:
+        kv_store.append(layer_id, k, v)
+
+    num_c = kv_store.num_chunks(layer_id)
+    kv_chunks = [kv_store.load(layer_id, c) for c in range(num_c)]
+    attn_out = chunked_attention(q, kv_chunks, scale, causal=False)
+    attn_out = attn_out.transpose(1, 2).contiguous().view(batch, tok, -1)
+    attn_out = attn.out_proj(attn_out)
+
+    hidden_states = residual + attn_out
+    hidden_states = hidden_states + block.feed_forward(block.ffn_norm(hidden_states))
+    return hidden_states

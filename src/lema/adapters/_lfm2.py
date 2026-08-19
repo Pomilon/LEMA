@@ -27,6 +27,8 @@ class Lfm2Adapter(LemaModelAdapter):
         self.hf_config = Lfm2MoeConfig(**config)
         if getattr(self.hf_config, "_attn_implementation", None) is None:
             self.hf_config._attn_implementation = config.get("attn_implementation", "eager")
+        if getattr(self.hf_config, "_experts_implementation", None) is None:
+            self.hf_config._experts_implementation = "grouped_mm"
 
         self.rotary_emb = Lfm2MoeRotaryEmbedding(self.hf_config)
 
@@ -65,13 +67,11 @@ class Lfm2Adapter(LemaModelAdapter):
                 f"{prefix}.feed_forward.w3.weight",
             ]
         else:
-            names.append(f"{prefix}.feed_forward.gate.weight")
-            for ei in range(self.hf_config.num_experts):
-                names += [
-                    f"{prefix}.feed_forward.experts.{ei}.w1.weight",
-                    f"{prefix}.feed_forward.experts.{ei}.w2.weight",
-                    f"{prefix}.feed_forward.experts.{ei}.w3.weight",
-                ]
+            names += [
+                f"{prefix}.feed_forward.gate.weight",
+                f"{prefix}.feed_forward.experts.gate_up_proj",
+                f"{prefix}.feed_forward.experts.down_proj",
+            ]
         return names
 
     def get_param_names_for_layer(self, layer_id: int) -> list[str]:
@@ -184,8 +184,43 @@ class Lfm2Adapter(LemaModelAdapter):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    def chunked_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                              kv_store, layer_id: int, kv_chunk_size: int = 8192) -> torch.Tensor:
+        from ._chunked_rope import lfm2_chunked_forward_layer, compute_rope
+        idx = layer_module.layer_idx if hasattr(layer_module, "layer_idx") else 0
+        if self.hf_config.layer_types[idx] != "full_attention":
+            return self.forward_layer(layer_module, hidden_states)
+        seq_len = hidden_states.shape[1]
+        position_ids = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).unsqueeze(0)
+        cos, sin = self.rotary_emb(hidden_states, position_ids)
+        if cos.ndim == 2:
+            cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
+        return lfm2_chunked_forward_layer(layer_module, hidden_states, kv_store, layer_id,
+                                          kv_chunk_size, cos, sin)
+
+    def decode_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                             kv_store, layer_id: int, kv_chunk_size: int = 8192,
+                             position: int = 0, is_new_token: bool = True) -> torch.Tensor:
+        from ._chunked_rope import lfm2_decode_forward_layer
+        idx = layer_module.layer_idx if hasattr(layer_module, "layer_idx") else 0
+        if self.hf_config.layer_types[idx] != "full_attention":
+            return self.forward_layer(layer_module, hidden_states)
+        pos_ids = torch.tensor([[position]], dtype=torch.long, device=hidden_states.device)
+        cos, sin = self.rotary_emb(hidden_states, pos_ids)
+        if cos.ndim == 2:
+            cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
+        return lfm2_decode_forward_layer(layer_module, hidden_states, kv_store, layer_id,
+                                         kv_chunk_size, cos, sin, is_new_token=is_new_token)
+
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
+        kv_store = kwargs.get("kv_store")
+        layer_id = kwargs.get("layer_id")
+        kv_chunk_size = kwargs.get("kv_chunk_size", 0)
+        if isinstance(layer_module, Lfm2MoeDecoderLayer):
+            if kv_store is not None and kv_chunk_size > 0 and hidden_states.size(1) > kv_chunk_size:
+                return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
+                                                  layer_id, kv_chunk_size)
         if not isinstance(layer_module, Lfm2MoeDecoderLayer):
             if isinstance(layer_module, Lfm2EmbeddingsLayer):
                 return layer_module(hidden_states)

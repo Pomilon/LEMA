@@ -29,7 +29,8 @@ def test_lfm2_adapter_init():
     param_names = adapter.get_param_names_for_layer(2)
     assert "model.layers.1.self_attn.q_proj.weight" in param_names
     assert "model.layers.1.feed_forward.gate.weight" in param_names
-    assert "model.layers.1.feed_forward.experts.0.w1.weight" in param_names
+    assert "model.layers.1.feed_forward.experts.gate_up_proj" in param_names
+    assert "model.layers.1.feed_forward.experts.down_proj" in param_names
 
     module = adapter.construct_layer_module(1)
     assert module is not None
