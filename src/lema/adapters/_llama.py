@@ -158,10 +158,37 @@ class LlamaAdapter(LemaModelAdapter):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    def chunked_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                              kv_store, layer_id: int, kv_chunk_size: int = 8192) -> torch.Tensor:
+        from ._chunked_rope import rope_chunked_forward_layer, compute_rope
+        seq_len = hidden_states.shape[1]
+        batch_size = hidden_states.shape[0]
+        position_ids = torch.arange(0, seq_len, dtype=torch.long, device=hidden_states.device)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        cos, sin = compute_rope(self, layer_module.self_attn, hidden_states, position_ids)
+        return rope_chunked_forward_layer(layer_module, hidden_states, kv_store, layer_id,
+                                          kv_chunk_size, cos, sin)
+
+    def decode_forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor,
+                             kv_store, layer_id: int, kv_chunk_size: int = 8192,
+                             position: int = 0, is_new_token: bool = True) -> torch.Tensor:
+        from ._chunked_rope import rope_decode_forward_layer, compute_rope
+        pos_ids = torch.tensor([[position]], dtype=torch.long, device=hidden_states.device)
+        cos, sin = compute_rope(self, layer_module.self_attn, hidden_states, pos_ids)
+        return rope_decode_forward_layer(layer_module, hidden_states, kv_store, layer_id,
+                                         kv_chunk_size, cos, sin, is_new_token=is_new_token)
+
     def forward_layer(self, layer_module: nn.Module, inputs: Any, **kwargs) -> Any:
         hidden_states = inputs[0] if isinstance(inputs, tuple) else inputs
+        kv_store = kwargs.get("kv_store")
+        layer_id = kwargs.get("layer_id")
+        kv_chunk_size = kwargs.get("kv_chunk_size", 0)
         if not isinstance(layer_module, LlamaDecoderLayer):
             return layer_module(hidden_states)
+
+        if kv_store is not None and kv_chunk_size > 0 and hidden_states.size(1) > kv_chunk_size:
+            return self.chunked_forward_layer(layer_module, hidden_states, kv_store,
+                                              layer_id, kv_chunk_size)
 
         batch_size, seq_len = hidden_states.shape[:2]
         device = hidden_states.device
