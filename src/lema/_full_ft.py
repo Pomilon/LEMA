@@ -86,14 +86,37 @@ class FullFTManager:
 
     def _init_disk_accumulators(self) -> None:
         import os
+        import json
         dirpath = os.path.join(self.config.output_dir, "grad_accum")
         os.makedirs(dirpath, exist_ok=True)
         self._memmap_files = {}
         self._memmaps = {}
+
+        # Sidecar: records the selection signature so reopening with a different
+        # selection does not silently reuse stale accumulator files.
+        sidecar_path = os.path.join(dirpath, "selection.json")
+        signature = {
+            str(layer_id): sorted(names)
+            for layer_id, names in self.selected.items()
+        }
+        fresh = False
+        if os.path.exists(sidecar_path):
+            try:
+                with open(sidecar_path) as f:
+                    old = json.load(f)
+                fresh = (old != signature)
+            except Exception:
+                fresh = True
+        else:
+            fresh = True
+        if fresh:
+            with open(sidecar_path, "w") as f:
+                json.dump(signature, f, indent=2)
+
         for layer_id, keys in self.selected_layer_keys.items():
             total = sum(self.get_accumulator(k).numel() for k in keys)
             path = os.path.join(dirpath, f"grad_acc_{layer_id}.bin")
-            is_new = not os.path.exists(path)
+            is_new = (not os.path.exists(path)) or fresh
             f = open(path, "a+b")
             if is_new:
                 f.truncate(total * 4)
@@ -101,6 +124,7 @@ class FullFTManager:
             arr = np.memmap(path, dtype="float32", mode="r+", shape=(total,))
             if is_new:
                 arr.fill(0)
+                arr.flush()
             offset = 0
             for key in keys:
                 n = self.get_accumulator(key).numel()
