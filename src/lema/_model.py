@@ -303,6 +303,81 @@ class LemaModel:
         gc.collect()
         torch.cuda.empty_cache()
 
+    def tune_budgets(self):
+        """Flight-check + BudgetEngine: proposes per-kind VRAM budgets (tuner
+        proposes; explicit config overrides win) and applies them to the store."""
+        from ._budget_engine import BudgetEngine
+        from ._tensorstore import StreamKind
+
+        logger.info("LEMA: Running Dynamic Flight Check for per-kind budgets...")
+        temp_mem = _TransferEngine(self.gbi, self.adapter, config=self.config)
+        itemsize = temp_mem.itemsize
+
+        test_layer_id = self.adapter.get_layer_metadata()[0]['id']
+        start = time.perf_counter()
+        temp_mem._pack_layer_to_ram(test_layer_id, slot=0, is_resident=False)
+        disk_time = time.perf_counter() - start
+        disk_size_mb = (temp_mem.max_params * itemsize) / (1024**2)
+        disk_speed_mb = disk_size_mb / max(disk_time, 1e-6)
+
+        if torch.cuda.is_available():
+            start = time.perf_counter()
+            for _ in range(5):
+                temp_mem.async_transfer_to_vram(test_layer_id, vram_slot=0, ram_slot=0)
+                temp_mem.get_vram_flat_buffer(0)
+            vram_time = (time.perf_counter() - start) / 5
+            vram_speed_mb = disk_size_mb / max(vram_time, 1e-6)
+        else:
+            vram_speed_mb = 1000.0
+
+        num_layers = len(self.adapter.get_layer_metadata())
+        t_comp_layer = 0.0
+        try:
+            dummy_optimizer = torch.optim.AdamW(self.get_trainable_parameters(), lr=0)
+            temp_trainer = LemaTrainer(
+                config=self.config, model_adapter=self.adapter, gbi=self.gbi,
+                lora_manager=self.lora_manager, memory_manager=temp_mem,
+                optimizer=dummy_optimizer,
+            )
+            dummy_input = torch.randint(0, 100, (1, 512), device=self.config.device)
+            temp_trainer.train_step(dummy_input)
+            start = time.perf_counter()
+            temp_trainer.train_step(dummy_input)
+            step_time = time.perf_counter() - start
+            t_comp_layer = step_time / (num_layers * 2)
+        except Exception as e:
+            logger.warning(f"LEMA: Dry-run compute benchmark failed ({e}) — using rough estimate")
+            t_comp_layer = 0.05
+
+        logger.info(f"LEMA: Benchmarked Disk: {disk_speed_mb:.1f} MB/s, PCIe: {vram_speed_mb:.1f} MB/s, T_comp: {t_comp_layer*1000:.1f} ms/layer")
+
+        kv_bytes_per_chunk = self.config.kv_chunk_size * 2 * 2  # K+V, fp16-ish estimate
+        measured = {
+            "disk_mb_per_s": disk_speed_mb,
+            "pcie_mb_per_s": vram_speed_mb,
+            "t_comp_layer_ms": t_comp_layer * 1000.0,
+            "layer_bytes": temp_mem.max_params * itemsize,
+            "kv_bytes_per_chunk": kv_bytes_per_chunk,
+            "chunks": 4,
+        }
+
+        report = BudgetEngine().tune(self.config, measured)
+        for kind, gb in report.per_kind_gb.items():
+            self.store._budgets[kind] = gb
+
+        # Little's Law prefetch distance (existing logic)
+        needed_dist = int(math.ceil(disk_time / max(t_comp_layer, 1e-6))) + 1
+        self.config.prefetch_distance = max(1, min(needed_dist, 5))
+
+        if self.config.max_ram_gb <= 0:
+            self.config.max_ram_gb = psutil.virtual_memory().total / (1024**3) * 0.75
+
+        logger.info(
+            f"LEMA: Budget report -> step {report.predicted_step_ms:.1f} ms, target met: {report.target_met}; "
+            f"per-kind VRAM: " + ", ".join(f"{k.value}={v:.2f}GB" for k, v in report.per_kind_gb.items())
+        )
+        return report
+
     @torch.no_grad()
     def generate(self,
                  prompt: str,
