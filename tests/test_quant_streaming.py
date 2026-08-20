@@ -88,6 +88,40 @@ def test_quantized_forward_close_to_fp16(tmp_path):
     assert diff < 0.1, f"quantized vs fp16 forward max diff {diff}"
 
 
+def test_int4_weight_stream_loads_and_matches(tmp_path):
+    model = _build_llama(tmp_path, weights_bits=4)
+    tr = model.store.transfer
+    assert tr.quant_bits == 4
+    layer_id = 1
+    tr.prefetch_to_ram(layer_id, slot=0)
+    tr.async_transfer_to_vram(layer_id, vram_slot=0, ram_slot=0)
+    flat = tr.get_vram_flat_buffer(0)
+    block = model.adapter.construct_layer_module(layer_id, flat, None)
+    q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
+    w_ref = q["model.layers.0.self_attn.q_proj.weight"]
+    w_lema = block.self_attn.q_proj.weight.detach()
+    rel = (w_lema.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    assert rel.item() < 1e-1, f"int4 weight rel error {rel.item()}"
+
+
+def test_int4_forward_close_to_fp16(tmp_path):
+    model_q = _build_llama(tmp_path, weights_bits=4)
+    model_fp = _build_llama(tmp_path, weights_bits=None)
+    hidden = torch.randn(1, 16, model_q.adapter.hidden_size)
+    layer_id = 1
+    outs = []
+    for model in (model_q, model_fp):
+        tr = model.store.transfer
+        tr.prefetch_to_ram(layer_id, slot=0)
+        tr.async_transfer_to_vram(layer_id, vram_slot=0, ram_slot=0)
+        flat = tr.get_vram_flat_buffer(0)
+        block = model.adapter.construct_layer_module(layer_id, flat, None)
+        block.eval()
+        outs.append(model.adapter.forward_layer(block, hidden))
+    diff = (outs[0].float() - outs[1].float()).abs().max().item()
+    assert diff < 0.3, f"int4 vs fp16 forward max diff {diff}"
+
+
 def test_ram_slot_repack_does_not_corrupt_vram_dequant(tmp_path):
     model = _build_llama(tmp_path, weights_bits=8)
     tr = model.store.transfer
