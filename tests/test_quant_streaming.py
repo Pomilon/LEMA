@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import pytest
 from transformers import LlamaConfig, LlamaForCausalLM
@@ -83,3 +84,48 @@ def test_quantized_forward_close_to_fp16(tmp_path):
         outs.append(model.adapter.forward_layer(block, hidden))
     diff = (outs[0].float() - outs[1].float()).abs().max().item()
     assert diff < 0.1, f"quantized vs fp16 forward max diff {diff}"
+
+
+def test_ram_slot_repack_does_not_corrupt_vram_dequant(tmp_path):
+    model = _build_llama(tmp_path, weights_bits=8)
+    tr = model.store.transfer
+    layer_a, layer_b = 1, 2
+    tr.prefetch_to_ram(layer_a, slot=0)
+    tr.async_transfer_to_vram(layer_a, vram_slot=0, ram_slot=0)
+    tr.prefetch_to_ram(layer_b, slot=0)
+    flat = tr.get_vram_flat_buffer(0)
+    block = model.adapter.construct_layer_module(layer_a, flat, None)
+    q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
+    w_ref = q["model.layers.0.self_attn.q_proj.weight"]
+    rel = (block.self_attn.q_proj.weight.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    assert rel.item() < 1e-2, f"dequant corrupted by slot repack: rel error {rel.item()}"
+
+
+def test_cross_slot_vram_transfer_dequant_matches(tmp_path):
+    model = _build_llama(tmp_path, weights_bits=8)
+    tr = model.store.transfer
+    layer_id = 1
+    tr.prefetch_to_ram(layer_id, slot=1)
+    tr.async_transfer_to_vram(layer_id, vram_slot=0, ram_slot=1)
+    flat = tr.get_vram_flat_buffer(0)
+    block = model.adapter.construct_layer_module(layer_id, flat, None)
+    q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
+    w_ref = q["model.layers.0.self_attn.q_proj.weight"]
+    rel = (block.self_attn.q_proj.weight.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    assert rel.item() < 1e-2, f"cross-slot dequant rel error {rel.item()}"
+
+
+def test_quantized_train_step_with_odd_prefetch_distance(tmp_path):
+    torch.manual_seed(0)
+    model_q = _build_llama(tmp_path, weights_bits=8, prefetch_distance=3)
+    model_fp = _build_llama(tmp_path, weights_bits=None, prefetch_distance=3)
+    from lema import LemaTrainer
+    ids = torch.randint(0, 50, (1, 16))
+    losses = []
+    for model in (model_q, model_fp):
+        trainer = LemaTrainer(config=model.config, model_adapter=model.adapter, gbi=model.gbi,
+                              lora_manager=model.lora_manager, store=model.store)
+        _, loss = trainer.train_step(ids, labels=ids.clone())
+        losses.append(loss)
+    assert math.isfinite(losses[0]) and losses[0] > 0
+    assert abs(losses[0] - losses[1]) < 0.2, f"quantized vs fp16 dist=3 train loss diverged: {losses[0]} vs {losses[1]}"

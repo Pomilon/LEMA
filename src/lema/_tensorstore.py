@@ -102,6 +102,7 @@ class _TransferEngine:
         ]
 
         self.vram_dequant: dict[int, torch.Tensor] = {}
+        self._vram_layer_ids: dict[int, int] = {}
         self._vram_ram_slot: dict[int, int] = {}
 
         # Per-instance CUDA event tracking (avoids full stream.synchronize())
@@ -255,11 +256,10 @@ class _TransferEngine:
             offset += numel
 
         if quant_weights is not None:
-            scale_key = layer_id if is_resident else 1000 + slot
             if scale_parts:
-                self.ram_scales[scale_key] = torch.cat([s.view(-1) for s in scale_parts])
+                self.ram_scales[layer_id] = torch.cat([s.view(-1) for s in scale_parts])
             else:
-                self.ram_scales[scale_key] = torch.tensor([], dtype=torch.float32)
+                self.ram_scales[layer_id] = torch.tensor([], dtype=torch.float32)
 
         del weights, quant_weights
 
@@ -302,7 +302,7 @@ class _TransferEngine:
         """Stage 2: Async transfer from RAM to GPU VRAM."""
         is_resident = (layer_id in self.ram_buffers and layer_id < 1000)
         self.vram_dequant.pop(vram_slot, None)
-        self.ram_layer_ids[vram_slot] = layer_id
+        self._vram_layer_ids[vram_slot] = layer_id
         self._vram_ram_slot[vram_slot] = -1 if is_resident else (ram_slot or 0)
 
         if self.use_cpp:
@@ -337,9 +337,10 @@ class _TransferEngine:
 
     def _dequant_slot(self, vram_slot: int) -> torch.Tensor:
         if vram_slot not in self.vram_dequant:
-            layer_id = self.ram_layer_ids[vram_slot]
-            slot = self._vram_ram_slot.get(vram_slot, vram_slot)
-            scale = self.get_layer_scale(layer_id, slot)
+            layer_id = self._vram_layer_ids[vram_slot]
+            scale = self.get_layer_scale(layer_id, self._vram_ram_slot.get(vram_slot, vram_slot))
+            if scale is None:
+                raise RuntimeError(f"Missing quantization scale for layer {layer_id} in vram slot {vram_slot}")
             raw = self.vram_flat_buffers[vram_slot][: self._layer_q_numel(layer_id)]
             self.vram_dequant[vram_slot] = self._dequant_layer(layer_id, raw, scale)
         return self.vram_dequant[vram_slot]
@@ -347,7 +348,7 @@ class _TransferEngine:
     def get_layer_scale(self, layer_id: int, slot: int) -> torch.Tensor | None:
         if not self.quant_bits:
             return None
-        scale = self.ram_scales.get(layer_id if layer_id in self.ram_scales else 1000 + slot)
+        scale = self.ram_scales.get(layer_id)
         if scale is None:
             return None
         return scale.to(self.device)
@@ -372,13 +373,13 @@ class _TransferEngine:
                 continue
             n = torch.Size(shape).numel()
             qn = n if self.quant_bits != 4 else (n + 1) // 2
-            p = raw[off : off + qn].to(torch.int8)
+            p = raw[off : off + qn].to(torch.uint8 if self.quant_bits == 4 else torch.int8)
             n_sc = scale_all[s_off : s_off + (shape[0] if len(shape) == 2 else 1)]
             out = dequantize(p, n_sc, bits=self.quant_bits)
             out = out.reshape(-1)
             if out.numel() != n:
                 out = out[:n]
-            parts.append(out.view(torch.Size(shape)).reshape(-1))
+            parts.append(out.view(-1))
             off += qn
             s_off += shape[0] if len(shape) == 2 else 1
         return torch.cat(parts)
@@ -389,6 +390,7 @@ class _TransferEngine:
         )
         self._transfer_event_ids.pop(vram_slot, None)
         self.vram_dequant.pop(vram_slot, None)
+        self._vram_layer_ids.pop(vram_slot, None)
         self._vram_ram_slot.pop(vram_slot, None)
 
     def close(self):
