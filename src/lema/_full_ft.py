@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from ._config import LemaConfig, TrainingMode
+from ._quant import quantize_tensor, dequantize
 from ._tensorstore import Stream, StreamKind
 from ._utils._logger import logger
 
@@ -41,30 +42,55 @@ class FullFTManager:
             self._init_disk_accumulators()
         else:
             for acc in self.accumulators.values():
-                acc.zero_()
+                if isinstance(acc, tuple):
+                    acc[0].zero_()
+                else:
+                    acc.zero_()
         if self.store is not None:
             self._register_streams()
+
+    def _q(self, v):
+        return v[0] if isinstance(v, tuple) else v
+
+    def _s(self, v):
+        return v[1] if isinstance(v, tuple) else None
+
+    def _deq(self, x, shape, bits):
+        if isinstance(x, tuple):
+            return dequantize(x[0], x[1], bits=bits).reshape(shape)
+        return x
+
+    def _deq_acc(self, x, key):
+        if isinstance(x, tuple):
+            return self._deq(x, self.true_weights[key].shape, self.config.grad_acc_bits or 8)
+        return x
+
+    def _restore_state_val(self, s, name, shape):
+        scale = s.get(f"{name}.scale")
+        if scale is not None:
+            return dequantize(s[name], scale, bits=8).reshape(shape)
+        return s[name]
 
     def _register_streams(self) -> None:
         for key in self.true_weights:
             layer_id, name = key
             self.store.register(Stream(
                 StreamKind.OPT_STATE, layer_id, f"{name}::exp_avg",
-                tuple(self.opt_states[key]["exp_avg"].shape),
-                self.opt_states[key]["exp_avg"].dtype,
-                source=lambda k=key: self.opt_states[k]["exp_avg"],
+                tuple(self._q(self.opt_states[key]["exp_avg"]).shape),
+                self._q(self.opt_states[key]["exp_avg"]).dtype,
+                source=lambda k=key: self._q(self.opt_states[k]["exp_avg"]),
             ))
             self.store.register(Stream(
                 StreamKind.OPT_STATE, layer_id, f"{name}::exp_avg_sq",
-                tuple(self.opt_states[key]["exp_avg_sq"].shape),
-                self.opt_states[key]["exp_avg_sq"].dtype,
-                source=lambda k=key: self.opt_states[k]["exp_avg_sq"],
+                tuple(self._q(self.opt_states[key]["exp_avg_sq"]).shape),
+                self._q(self.opt_states[key]["exp_avg_sq"]).dtype,
+                source=lambda k=key: self._q(self.opt_states[k]["exp_avg_sq"]),
             ))
             self.store.register(Stream(
                 StreamKind.GRAD_ACC, layer_id, name,
-                tuple(self.accumulators[key].shape),
-                self.accumulators[key].dtype,
-                source=lambda k=key: self.accumulators[k],
+                tuple(self._q(self.accumulators[key]).shape),
+                self._q(self.accumulators[key]).dtype,
+                source=lambda k=key: self._q(self.accumulators[k]),
             ))
 
     def _choose_accum_backend(self) -> str:
@@ -74,7 +100,7 @@ class FullFTManager:
         if requested == "ram":
             return "ram"
         # auto: estimate fp32 accumulator bytes vs half the RAM budget
-        bytes_needed = self.total_selected_params() * 4
+        bytes_needed = self.total_selected_params() * (self.config.grad_acc_bits or 32) // 8
         ram_budget = self.config.max_ram_gb
         if ram_budget <= 0:
             import psutil
@@ -99,6 +125,7 @@ class FullFTManager:
             str(layer_id): sorted(names)
             for layer_id, names in self.selected.items()
         }
+        signature["grad_acc_bits"] = self.config.grad_acc_bits
         fresh = False
         if os.path.exists(sidecar_path):
             try:
@@ -113,23 +140,42 @@ class FullFTManager:
             with open(sidecar_path, "w") as f:
                 json.dump(signature, f, indent=2)
 
+        acc_bits = self.config.grad_acc_bits if self.config.grad_acc_bits else None
         for layer_id, keys in self.selected_layer_keys.items():
-            total = sum(self.get_accumulator(k).numel() for k in keys)
+            total = sum(self._q(self.get_accumulator(k)).numel() for k in keys)
             path = os.path.join(dirpath, f"grad_acc_{layer_id}.bin")
             is_new = (not os.path.exists(path)) or fresh
             f = open(path, "a+b")
             if is_new:
-                f.truncate(total * 4)
+                f.truncate(total * (1 if acc_bits else 4))
             self._memmap_files[layer_id] = f
-            arr = np.memmap(path, dtype="float32", mode="r+", shape=(total,))
+            arr = np.memmap(path, dtype="int8" if acc_bits else "float32", mode="r+", shape=(total,))
             if is_new:
                 arr.fill(0)
                 arr.flush()
+            if acc_bits:
+                total_scale = sum(self._s(self.get_accumulator(k)).numel() for k in keys)
+                scale_path = os.path.join(dirpath, f"grad_acc_{layer_id}_scale.bin")
+                sf = open(scale_path, "a+b")
+                if is_new:
+                    sf.truncate(total_scale * 4)
+                self._memmap_files[f"{layer_id}.scale"] = sf
+                sarr = np.memmap(scale_path, dtype="float32", mode="r+", shape=(total_scale,))
+                if is_new:
+                    sarr.fill(1.0)
+                    sarr.flush()
             offset = 0
+            s_offset = 0
             for key in keys:
-                n = self.get_accumulator(key).numel()
-                view = torch.from_numpy(arr[offset:offset + n]).view(self.get_accumulator(key).shape)
-                self.accumulators[key] = view
+                n = self._q(self.get_accumulator(key)).numel()
+                view = torch.from_numpy(arr[offset:offset + n]).view(self._q(self.get_accumulator(key)).shape)
+                if acc_bits:
+                    s_n = self._s(self.get_accumulator(key)).numel()
+                    s_view = torch.from_numpy(sarr[s_offset:s_offset + s_n]).view(self._s(self.get_accumulator(key)).shape)
+                    self.accumulators[key] = (view, s_view)
+                    s_offset += s_n
+                else:
+                    self.accumulators[key] = view
                 self._memmaps[key] = arr
                 offset += n
 
@@ -146,6 +192,8 @@ class FullFTManager:
 
     def _init_weights(self) -> None:
         dtype = self.config.dtype if isinstance(self.config.dtype, torch.dtype) else getattr(torch, self.config.dtype, torch.float32)
+        opt_bits = self.config.opt_state_bits if self.config.opt_state_bits else None
+        acc_bits = self.config.grad_acc_bits if self.config.grad_acc_bits else None
         for layer_id, keys in self.selected_layer_keys.items():
             for key in keys:
                 _, name = key
@@ -153,11 +201,20 @@ class FullFTManager:
                 w = w.to(dtype).contiguous()
                 self.true_weights[key] = w
                 self.original[key] = w.clone()
-                self.opt_states[key] = {
-                    "exp_avg": torch.zeros_like(w, dtype=torch.float32),
-                    "exp_avg_sq": torch.zeros_like(w, dtype=torch.float32),
-                }
-                self.accumulators[key] = torch.zeros_like(w, dtype=torch.float32)
+                if opt_bits:
+                    self.opt_states[key] = {
+                        "exp_avg": quantize_tensor(torch.zeros_like(w, dtype=torch.float32), opt_bits),
+                        "exp_avg_sq": quantize_tensor(torch.zeros_like(w, dtype=torch.float32), opt_bits),
+                    }
+                else:
+                    self.opt_states[key] = {
+                        "exp_avg": torch.zeros_like(w, dtype=torch.float32),
+                        "exp_avg_sq": torch.zeros_like(w, dtype=torch.float32),
+                    }
+                if acc_bits:
+                    self.accumulators[key] = quantize_tensor(torch.zeros_like(w, dtype=torch.float32), acc_bits)
+                else:
+                    self.accumulators[key] = torch.zeros_like(w, dtype=torch.float32)
 
     def _init_module_name_map(self) -> None:
         for layer_id, keys in self.selected_layer_keys.items():
@@ -184,21 +241,37 @@ class FullFTManager:
                 param.requires_grad_(False)
 
     def accumulate_grads(self, layer_id: int, module) -> None:
+        acc_bits = self.config.grad_acc_bits if self.config.grad_acc_bits else None
         name_to_key = self.module_name_to_key.get(layer_id, {})
         for name, param in module.named_parameters():
             key = name_to_key.get(name)
             if key is not None and param.grad is not None:
-                self.get_accumulator(key).add_(param.grad.float().to(self.accumulators[key].device))
+                acc = self.get_accumulator(key)
+                if isinstance(acc, tuple):
+                    g = param.grad.float().to(acc[0].device)
+                    deq = self._deq_acc(acc, key).to(acc[0].device)
+                    q, s = quantize_tensor(deq + g, acc_bits)
+                    acc[0].copy_(q)
+                    acc[1].copy_(s)
+                else:
+                    self.get_accumulator(key).add_(param.grad.float().to(self.accumulators[key].device))
                 param.grad = None
 
     def clip_grad_norm_(self, layer_id: int, max_norm: float = 1.0) -> float:
+        acc_bits = self.config.grad_acc_bits if self.config.grad_acc_bits else None
         keys = self.selected_layer_keys.get(layer_id, [])
-        total = sum(self.get_accumulator(k).float().pow(2).sum().item() for k in keys)
+        total = sum(self._deq_acc(self.get_accumulator(k), k).float().pow(2).sum().item() for k in keys)
         norm = math.sqrt(total)
         if norm > max_norm and norm > 0:
             coeff = max_norm / norm
             for k in keys:
-                self.get_accumulator(k).mul_(coeff)
+                acc = self.get_accumulator(k)
+                if isinstance(acc, tuple):
+                    q, s = quantize_tensor(self._deq_acc(acc, k) * coeff, acc_bits)
+                    acc[0].copy_(q)
+                    acc[1].copy_(s)
+                else:
+                    self.get_accumulator(k).mul_(coeff)
         return norm
 
     def step_layer(self, layer_id: int) -> None:
@@ -209,14 +282,16 @@ class FullFTManager:
         self.layer_steps[layer_id] = step
         b1 = 1 - beta1 ** step
         b2 = 1 - beta2 ** step
+        opt_bits = self.config.opt_state_bits if self.config.opt_state_bits else None
+        acc_bits = self.config.grad_acc_bits if self.config.grad_acc_bits else None
         for name, key in self.module_name_to_key.get(layer_id, {}).items():
             w = self.true_weights[key]
-            grad = self.get_accumulator(key)
+            grad = self._deq_acc(self.get_accumulator(key), key)
             state = self.get_opt_state(key)
             w_dev = w.to(self.config.device).float()
             g_dev = grad.to(self.config.device)
-            m = state["exp_avg"].to(self.config.device)
-            v = state["exp_avg_sq"].to(self.config.device)
+            m = self._deq(state["exp_avg"], w.shape, opt_bits or 8).to(self.config.device)
+            v = self._deq(state["exp_avg_sq"], w.shape, opt_bits or 8).to(self.config.device)
             if wd:
                 w_dev.mul_(1 - lr * wd)
             m.mul_(beta1).add_(g_dev, alpha=1 - beta1)
@@ -224,9 +299,19 @@ class FullFTManager:
             denom = v.sqrt().div_(math.sqrt(b2)).add_(eps)
             w_dev.addcdiv_(m, denom, value=-(lr / b1))
             w.copy_(w_dev.to(w.dtype))
-            state["exp_avg"].copy_(m)
-            state["exp_avg_sq"].copy_(v)
-            self.get_accumulator(key).zero_()
+            if opt_bits:
+                self.opt_states[key]["exp_avg"] = quantize_tensor(m.cpu(), opt_bits)
+                self.opt_states[key]["exp_avg_sq"] = quantize_tensor(v.cpu(), opt_bits)
+            else:
+                state["exp_avg"].copy_(m)
+                state["exp_avg_sq"].copy_(v)
+            if acc_bits:
+                q, s = quantize_tensor(torch.zeros_like(w, dtype=torch.float32), acc_bits)
+                acc_q, acc_s = self.get_accumulator(key)
+                acc_q.copy_(q)
+                acc_s.copy_(s)
+            else:
+                self.get_accumulator(key).zero_()
 
     def get_trainable_parameters(self) -> list[torch.Tensor]:
         return list(self.true_weights.values())
@@ -339,13 +424,21 @@ class FullFTManager:
     def save_optimizer(self, save_directory: str) -> None:
         import os
         os.makedirs(save_directory, exist_ok=True)
-        states = {
-            f"{key[0]}.{key[1]}": {
-                "exp_avg": s["exp_avg"],
-                "exp_avg_sq": s["exp_avg_sq"],
-            }
-            for key, s in self.opt_states.items()
-        }
+        states = {}
+        for key, s in self.opt_states.items():
+            ref = f"{key[0]}.{key[1]}"
+            if isinstance(s["exp_avg"], tuple):
+                states[ref] = {
+                    "exp_avg": s["exp_avg"][0],
+                    "exp_avg_sq": s["exp_avg_sq"][0],
+                    "exp_avg.scale": s["exp_avg"][1],
+                    "exp_avg_sq.scale": s["exp_avg_sq"][1],
+                }
+            else:
+                states[ref] = {
+                    "exp_avg": s["exp_avg"],
+                    "exp_avg_sq": s["exp_avg_sq"],
+                }
         torch.save({"layer_steps": self.layer_steps, "states": states},
                    os.path.join(save_directory, "optimizer_fullft.bin"))
 
@@ -357,8 +450,18 @@ class FullFTManager:
         data = torch.load(path, map_location="cpu", weights_only=True)
         self.layer_steps = data["layer_steps"]
         key_by_ref = {f"{key[0]}.{key[1]}": key for key in self.opt_states}
+        opt_bits = self.config.opt_state_bits if self.config.opt_state_bits else None
         for ref, s in data["states"].items():
             key = key_by_ref.get(ref)
-            if key is not None:
-                self.opt_states[key]["exp_avg"].copy_(s["exp_avg"])
-                self.opt_states[key]["exp_avg_sq"].copy_(s["exp_avg_sq"])
+            if key is None:
+                continue
+            target = self.opt_states[key]
+            shape = self._q(target["exp_avg"]).shape
+            m = self._restore_state_val(s, "exp_avg", shape)
+            v = self._restore_state_val(s, "exp_avg_sq", shape)
+            if opt_bits:
+                target["exp_avg"] = quantize_tensor(m, opt_bits)
+                target["exp_avg_sq"] = quantize_tensor(v, opt_bits)
+            else:
+                target["exp_avg"].copy_(m)
+                target["exp_avg_sq"].copy_(v)

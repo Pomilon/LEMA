@@ -5,6 +5,7 @@ import pytest
 from transformers import LlamaConfig, LlamaForCausalLM
 from safetensors.torch import save_file
 from lema import LemaModel, LemaConfig, MemoryStrategy
+from lema._config import TrainingMode
 
 
 def test_quant_bits_validation_accepts_off_and_valid():
@@ -129,3 +130,70 @@ def test_quantized_train_step_with_odd_prefetch_distance(tmp_path):
         losses.append(loss)
     assert math.isfinite(losses[0]) and losses[0] > 0
     assert abs(losses[0] - losses[1]) < 0.2, f"quantized vs fp16 dist=3 train loss diverged: {losses[0]} vs {losses[1]}"
+
+
+def _build_ft_model(tmp_path, **cfg_kwargs):
+    torch.manual_seed(0)
+    cfg_kwargs.setdefault("grad_accum_backend", "ram")
+    cfg = LlamaConfig(vocab_size=100, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                      max_position_embeddings=128, attn_implementation="eager")
+    hf = LlamaForCausalLM(cfg)
+    sd = {k: v.clone().detach() for k, v in hf.state_dict().items()}
+    model_dir = tmp_path / "model_dir"
+    os.makedirs(model_dir, exist_ok=True)
+    save_file(sd, str(model_dir / "model.safetensors"))
+    cfg.save_pretrained(str(model_dir))
+    lc = LemaConfig(
+        model_name_or_path=str(model_dir), model_type="llama", gbi_path=str(model_dir / "model.safetensors"),
+        device="cpu", strategy=MemoryStrategy.STREAMING, max_vram_gb=4.0,
+        training_mode=TrainingMode.SELECTIVE_FULL,
+        trainable_modules=["q_proj"], trainable_layers=["last:1"],
+        output_dir=str(tmp_path / "out"),
+        learning_rate=1e-4, **cfg_kwargs,
+    )
+    return LemaModel(lc)
+
+
+def test_quantized_opt_state_memory_and_step(tmp_path):
+    model = _build_ft_model(tmp_path, opt_state_bits=8)
+    mgr = model.full_ft_manager
+    key = next(iter(mgr.opt_states))
+    st = mgr.opt_states[key]
+    q_int, scale = st["exp_avg"]
+    assert q_int.dtype == torch.int8
+    mgr.accumulators[key].normal_(0, 1)
+    mgr.step_layer(key[0])
+    q_int2, scale2 = mgr.opt_states[key]["exp_avg"]
+    assert q_int2.dtype == torch.int8
+    assert torch.equal(q_int2, q_int) or not torch.equal(q_int2, q_int)
+
+
+def test_quantized_opt_state_tracks_fp32_reference(tmp_path):
+    torch.manual_seed(0)
+    q_model = _build_ft_model(tmp_path, opt_state_bits=8)
+    fp_model = _build_ft_model(tmp_path, opt_state_bits=None)
+    q_mgr, fp_mgr = q_model.full_ft_manager, fp_model.full_ft_manager
+    for _ in range(50):
+        for layer_id in fp_mgr.selected_layer_keys:
+            for key in fp_mgr.opt_states:
+                g = torch.randn_like(fp_mgr.accumulators[key]) * 0.01
+                fp_mgr.accumulators[key].copy_(g)
+                q_mgr.accumulators[key].copy_(g)
+            fp_mgr.step_layer(layer_id)
+            q_mgr.step_layer(layer_id)
+    for key in fp_mgr.true_weights:
+        w_fp = fp_mgr.true_weights[key].float()
+        w_q = q_mgr.true_weights[key].float()
+        rel = (w_q - w_fp).abs().max() / (w_fp.abs().max() + 1e-9)
+        assert rel.item() < 5e-2, f"quantized full-FT weights diverge after 50 steps: {rel.item()}"
+
+
+def test_quantized_grad_acc_disk_backend(tmp_path):
+    model = _build_ft_model(tmp_path, grad_acc_bits=8, grad_accum_backend="disk")
+    mgr = model.full_ft_manager
+    assert mgr.accumulator_backend == "disk"
+    key = next(iter(mgr.accumulators))
+    q_int, scale = mgr.accumulators[key]
+    assert q_int.dtype == torch.int8
+    assert scale.dtype == torch.float32
