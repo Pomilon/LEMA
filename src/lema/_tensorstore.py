@@ -33,6 +33,7 @@ class Stream:
     shape: tuple[int, ...]
     dtype: torch.dtype
     source: Callable[[], torch.Tensor] | None = None
+    bits: int | None = None
 
 
 def parse_vram_setting(value: str, max_vram_gb: float) -> float:
@@ -70,6 +71,9 @@ class _TransferEngine:
                      self.dtype = sample_tensor.dtype
             except: pass
 
+        self.quant_bits = self.config.weights_bits if self.config.weights_bits else None
+        self.ram_scales: dict[int, torch.Tensor] = {}
+
         self.itemsize = torch.tensor([], dtype=self.dtype).element_size()
         self.max_params = self._calculate_max_params()
 
@@ -96,6 +100,9 @@ class _TransferEngine:
             torch.empty(self.max_params, device=self.device, dtype=self.dtype)
             for _ in range(2)
         ]
+
+        self.vram_dequant: dict[int, torch.Tensor] = {}
+        self._vram_ram_slot: dict[int, int] = {}
 
         # Per-instance CUDA event tracking (avoids full stream.synchronize())
         self._transfer_event_ids: dict[int, int] = {}
@@ -214,7 +221,13 @@ class _TransferEngine:
     def _pack_layer_to_ram(self, layer_id: int, slot: int = 0, is_resident: bool = False):
         """Load a layer from disk and pack into a flat RAM buffer."""
         param_names = self.adapter.get_param_names_for_layer(layer_id)
-        weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
+        if self.quant_bits:
+            from ._quant import quantize_tensor
+            weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
+            quant_weights = {n: quantize_tensor(w, self.quant_bits) for n, w in weights.items()}
+        else:
+            weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
+            quant_weights = None
 
         if is_resident:
             total_el = sum(w.numel() for w in weights.values())
@@ -227,15 +240,28 @@ class _TransferEngine:
         else:
             buf = self.ram_buffers[1000 + slot]
 
-        # Python packing (equally fast as C++ memcpy, no pybind11 overhead)
         offset = 0
+        scale_parts = []
         for name in param_names:
-            w = weights[name]
-            numel = w.numel()
-            buf[offset : offset + numel].copy_(w.view(-1))
+            if quant_weights is not None:
+                q_int, scale = quant_weights[name]
+                numel = q_int.numel()
+                buf[offset : offset + numel].copy_(q_int.view(-1))
+                scale_parts.append(scale)
+            else:
+                w = weights[name]
+                numel = w.numel()
+                buf[offset : offset + numel].copy_(w.view(-1))
             offset += numel
 
-        del weights
+        if quant_weights is not None:
+            scale_key = layer_id if is_resident else 1000 + slot
+            if scale_parts:
+                self.ram_scales[scale_key] = torch.cat([s.view(-1) for s in scale_parts])
+            else:
+                self.ram_scales[scale_key] = torch.tensor([], dtype=torch.float32)
+
+        del weights, quant_weights
 
         if not is_resident:
             self.ram_layer_ids[slot] = layer_id
@@ -275,6 +301,9 @@ class _TransferEngine:
     def async_transfer_to_vram(self, layer_id: int, vram_slot: int, ram_slot: int | None = None):
         """Stage 2: Async transfer from RAM to GPU VRAM."""
         is_resident = (layer_id in self.ram_buffers and layer_id < 1000)
+        self.vram_dequant.pop(vram_slot, None)
+        self.ram_layer_ids[vram_slot] = layer_id
+        self._vram_ram_slot[vram_slot] = -1 if is_resident else (ram_slot or 0)
 
         if self.use_cpp:
             cpp_layer_id = layer_id if is_resident else (1000 + (ram_slot or 0))
@@ -296,17 +325,71 @@ class _TransferEngine:
             event_id = self._transfer_event_ids.pop(vram_slot, -1)
             if event_id >= 0:
                 self.cpp_mgr.wait_vram_transfer(event_id)
+            if self.quant_bits:
+                return self._dequant_slot(vram_slot)
             return self.vram_flat_buffers[vram_slot]
         else:
             if self.is_cuda and self.transfer_streams:
                 self.transfer_streams[vram_slot].synchronize()
+            if self.quant_bits:
+                return self._dequant_slot(vram_slot)
             return self.vram_flat_buffers[vram_slot]
+
+    def _dequant_slot(self, vram_slot: int) -> torch.Tensor:
+        if vram_slot not in self.vram_dequant:
+            layer_id = self.ram_layer_ids[vram_slot]
+            slot = self._vram_ram_slot.get(vram_slot, vram_slot)
+            scale = self.get_layer_scale(layer_id, slot)
+            raw = self.vram_flat_buffers[vram_slot][: self._layer_q_numel(layer_id)]
+            self.vram_dequant[vram_slot] = self._dequant_layer(layer_id, raw, scale)
+        return self.vram_dequant[vram_slot]
+
+    def get_layer_scale(self, layer_id: int, slot: int) -> torch.Tensor | None:
+        if not self.quant_bits:
+            return None
+        scale = self.ram_scales.get(layer_id if layer_id in self.ram_scales else 1000 + slot)
+        if scale is None:
+            return None
+        return scale.to(self.device)
+
+    def _layer_q_numel(self, layer_id: int) -> int:
+        total = 0
+        for name in self.adapter.get_param_names_for_layer(layer_id):
+            shape = self.adapter.get_tensor_shape(self.gbi, name)
+            if shape is not None:
+                n = torch.Size(shape).numel()
+                total += n if self.quant_bits != 4 else (n + 1) // 2
+        return total
+
+    def _dequant_layer(self, layer_id: int, raw: torch.Tensor, scale_all: torch.Tensor) -> torch.Tensor:
+        from ._quant import dequantize
+        parts = []
+        off = 0
+        s_off = 0
+        for name in self.adapter.get_param_names_for_layer(layer_id):
+            shape = self.adapter.get_tensor_shape(self.gbi, name)
+            if shape is None:
+                continue
+            n = torch.Size(shape).numel()
+            qn = n if self.quant_bits != 4 else (n + 1) // 2
+            p = raw[off : off + qn].to(torch.int8)
+            n_sc = scale_all[s_off : s_off + (shape[0] if len(shape) == 2 else 1)]
+            out = dequantize(p, n_sc, bits=self.quant_bits)
+            out = out.reshape(-1)
+            if out.numel() != n:
+                out = out[:n]
+            parts.append(out.view(torch.Size(shape)).reshape(-1))
+            off += qn
+            s_off += shape[0] if len(shape) == 2 else 1
+        return torch.cat(parts)
 
     def clear_vram_slot(self, vram_slot: int):
         self.vram_flat_buffers[vram_slot] = torch.empty(
             self.max_params, device=self.device, dtype=self.dtype
         )
         self._transfer_event_ids.pop(vram_slot, None)
+        self.vram_dequant.pop(vram_slot, None)
+        self._vram_ram_slot.pop(vram_slot, None)
 
     def close(self):
         """Explicit cleanup. Releases GPU memory, shuts down thread pools, destroys C++ backend."""

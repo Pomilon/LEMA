@@ -131,6 +131,7 @@ class LemaModel:
                         StreamKind.WEIGHTS, layer["id"], name, tuple(shape),
                         store.dtype,
                         source=lambda n=name: self.adapter.load_tensor(self.gbi, n),
+                        bits=self.config.weights_bits if self.config.weights_bits else None,
                     ))
         return store
 
