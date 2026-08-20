@@ -16,6 +16,19 @@ try:
 except Exception:
     pass
 
+try:
+    from torch.utils.cpp_extension import CppExtension, BuildExtension
+    ext_modules.append(
+        CppExtension(
+            name='lema._csrc._w8a8_cpp',
+            sources=['src/lema/_csrc/w8a8.cpp'],
+            extra_compile_args=['-O3', '-std=c++17', '-mavx2', '-mfma'],
+        ),
+    )
+    cmdclass['build_ext'] = BuildExtension
+except Exception:
+    pass
+
 setup(
     name='lema',
     version='1.0.0',
