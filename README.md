@@ -140,9 +140,30 @@ Chunked attention and KV-cached generation are supported on **all adapters**: GP
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) for the full design and T4 validation.
 
-## Next: Quantization
+## Quantization
 
-Quantization support is the next planned milestone: quantized weight streaming (e.g. 4/8-bit) through the TensorStore to further cut VRAM and RAM for large models, plus quantized full-FT states. Stay tuned.
+All four memory classes LEMA moves — streamed weights, full-FT optimizer states, gradient accumulators, and the KV cache — can be quantized per-class via four config fields:
+
+| Field | Allowed values | Savings vs baseline |
+|---|---|---|
+| `weights_bits` | `None`/`0` (off), `8`, `4` | int8 ≈ 2×; int4 ≈ 4× on weight disk/RAM (fp16 → 8/4-bit) |
+| `opt_state_bits` | `None`/`0` (off), `8` | ≈ 4× on Adam moments (fp32 → int8) |
+| `grad_acc_bits` | `None`/`0` (off), `8` | ≈ 4× on gradient accumulators (fp32 → int8) |
+| `kv_bits` | `None`/`0` (off), `8` | ≈ 2× on the KV cache (fp16 → int8) |
+
+```python
+config = LemaConfig(
+    model_name_or_path="NousResearch/Llama-2-7b-hf",
+    weights_bits=8,        # int8 streamed weights (4 = int4, weights only)
+    opt_state_bits=8,      # int8 Adam moments in full-FT
+    grad_acc_bits=8,       # int8 gradient accumulators
+    kv_bits=8,             # int8 KV cache chunks
+)
+```
+
+Weights are quantized and packed in the RAM staging buffer and dequantized into the VRAM execution slot at consumption, so the disk and RAM footprint shrinks while compute stays at full precision. Full-FT optimizer states and accumulators stay quantized in RAM (including the mmap disk backend) and are dequantized only inside the per-layer AdamW step. The KV cache stores int8 values with a dynamic per-chunk scale.
+
+**Trade-offs:** int8 keeps training output within ~1% of fp16 — quantized weight relative error < 1e-2, forward max-diff < 0.1, and train loss within 0.2 of the fp16 baseline (see `tests/test_quant_streaming.py`). int4 weights trade more precision for 4× weight savings. The quantize/dequantize passes add a small per-step time cost.
 
 ## Documentation
 

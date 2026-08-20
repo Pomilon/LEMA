@@ -245,6 +245,39 @@ def test_quantized_kv_disk_mmap(tmp_path):
     assert len(files) == 4
 
 
+def test_quantized_everything_train_smoke(tmp_path):
+    model = _build_ft_model(tmp_path, weights_bits=8, opt_state_bits=8, grad_acc_bits=8, kv_bits=8)
+    model.to("cpu")
+    assert model.store.transfer.quant_bits == 8
+    mgr = model.full_ft_manager
+    st = next(iter(mgr.opt_states.values()))
+    assert st["exp_avg"][0].dtype == torch.int8
+    acc = next(iter(mgr.accumulators.values()))
+    assert acc[0].dtype == torch.int8
+    trainer = model.get_trainer()
+    torch.manual_seed(0)
+    ids = torch.randint(0, 50, (1, 16))
+    _, loss = trainer.train_step(ids, labels=ids.clone())
+    assert loss is not None and math.isfinite(loss)
+    _, loss2 = trainer.train_step(ids, labels=ids.clone())
+    assert loss2 != loss
+
+    class Tok:
+        def __init__(self):
+            self.eos_token_id = 2
+        def __call__(self, prompt, return_tensors="pt"):
+            ids = torch.tensor([[1, 3, 5, 7]])
+            class _Wrap(dict):
+                def to(self, device):
+                    self["input_ids"] = self["input_ids"].to(device)
+                    return self
+            return _Wrap(input_ids=ids)
+        def decode(self, ids, skip_special_tokens=True):
+            return ",".join(str(int(x)) for x in ids.tolist())
+    out = model.generate_kv("x", Tok(), max_new_tokens=8, do_sample=False, kv_chunk_size=4)
+    assert len(out) > 0
+
+
 def test_quantized_kv_append_grows_chunk():
     torch.manual_seed(2)
     tokens = [(torch.randn(2, 4, 1, 16), torch.randn(2, 4, 1, 16)) for _ in range(6)]

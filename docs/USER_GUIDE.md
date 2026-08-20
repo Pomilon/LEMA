@@ -139,7 +139,42 @@ merge_delta(
 
 To resume training, `LemaModel.from_pretrained("checkpoints/lema-7b-selective-full-ft")` restores both the deltas and the optimizer state.
 
-## 6. Tips for Maximum Efficiency
+## 6. Quantization
+
+Every memory class LEMA moves can be quantized independently: streamed weights, full-FT optimizer states, gradient accumulators, and the KV cache. Set the four `*_bits` fields on `LemaConfig`; leave a field `None` (or `0`) to keep that class at full precision.
+
+```python
+import torch
+from lema import LemaConfig, LemaModel, MemoryStrategy
+
+# int8 everything — halves weight/KV footprint, quarters fp32 state/accumulator RAM
+config = LemaConfig(
+    model_name_or_path="NousResearch/Llama-2-7b-hf",
+    strategy=MemoryStrategy.STREAMING,
+    training_mode="selective_full",
+    trainable_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    trainable_layers=["last:4"],
+    weights_bits=8,        # int8 streamed weights (~2x on disk/RAM); use 4 for int4 (~4x)
+    opt_state_bits=8,      # int8 Adam moments (~4x vs fp32)
+    grad_acc_bits=8,       # int8 gradient accumulators (~4x vs fp32)
+    kv_bits=8,             # int8 KV cache chunks (~2x)
+    learning_rate=1e-4,
+    output_dir="checkpoints",
+)
+
+model = LemaModel(config)
+trainer = model.get_trainer()
+
+for batch in dataloader:
+    logits, loss = trainer.train_step(batch['input_ids'], labels=batch['labels'])
+    print(f"Loss: {loss}")
+
+model.close()
+```
+
+Quantized training tracks the fp16 baseline closely (int8 forward max-diff < 0.1; train loss within 0.2 of fp16). For the largest weight savings on memory-bound inference/streaming, set `weights_bits=4` — int4 packs two weights per byte — at a slightly larger precision cost. The quantize/dequantize passes add a small per-step overhead, so enable quantization when memory (VRAM/RAM) is the bottleneck.
+
+## 7. Tips for Maximum Efficiency
 
 1. **Gradient Checkpointing**: Always enable `gradient_checkpointing=True` for 7B+ models. This significantly reduces VRAM usage during the backward pass by not storing intermediate activations.
 2. **Pinned Memory**: LEMA automatically uses pinned memory for transfers. Ensure your system has sufficient RAM available for the staging buffers (~2x the size of the largest layer).

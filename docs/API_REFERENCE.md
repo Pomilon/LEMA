@@ -3,7 +3,7 @@
 ## Public API (`from lema import ...`)
 
 ### `LemaConfig`
-Configuration dataclass for LEMA. All 28 fields:
+Configuration dataclass for LEMA. All 40 fields:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -36,6 +36,17 @@ Configuration dataclass for LEMA. All 28 fields:
 | `grad_accum_backend` | `str` | `"auto"` | `"auto"` | `"ram"` | `"disk"`. `auto` picks disk when fp32 accumulators exceed the RAM budget. |
 | `save_optimizer` | `bool` | `True` | Save fp32 Adam moments + layer steps with each full-FT checkpoint. |
 | `weight_decay` | `float` | `0.01` | AdamW weight decay for full-FT per-layer stepping. |
+| `weights_vram` | `str` | `"auto"` | VRAM budget for streamed weights: `"auto"` (equal share), fraction of `max_vram_gb` (e.g. `"0.3"`), or absolute (e.g. `"4.0GB"`). |
+| `opt_state_vram` | `str` | `"auto"` | VRAM budget for full-FT optimizer states. Same syntax as `weights_vram`. |
+| `grad_acc_vram` | `str` | `"auto"` | VRAM budget for gradient accumulators. Same syntax as `weights_vram`. |
+| `kv_vram` | `str` | `"auto"` | VRAM budget for KV cache chunks. Same syntax as `weights_vram`. |
+| `target_step_time_ms` | `float` | `0.0` | Budget-engine target step time; minimizes VRAM residency to meet it (`0` = maximize throughput). |
+| `target_tokens_per_sec` | `float` | `0.0` | Budget-engine target throughput in tokens/s (`0` = unset). |
+| `kv_chunk_size` | `int` | `8192` | Tokens per KV chunk for chunked attention / KV-cached generation. |
+| `weights_bits` | `int \| None` | `None` | Quantize streamed weights: `None`/`0` off, `8` = int8 (≈2×), `4` = int4 (≈4×). Dequantized into the VRAM slot at consumption. |
+| `opt_state_bits` | `int \| None` | `None` | Quantize full-FT Adam moments: `None`/`0` off, `8` = int8 (≈4× vs fp32). |
+| `grad_acc_bits` | `int \| None` | `None` | Quantize gradient accumulators: `None`/`0` off, `8` = int8 (≈4× vs fp32). Applies to RAM and disk backends. |
+| `kv_bits` | `int \| None` | `None` | Quantize KV cache chunks: `None`/`0` off, `8` = int8 (≈2×) with a dynamic per-chunk scale. |
 
 Methods:
 - `to_dict()` → `dict` — serializes config (handles enums).
