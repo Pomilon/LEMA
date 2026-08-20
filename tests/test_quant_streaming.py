@@ -242,7 +242,7 @@ def test_quantized_kv_disk_mmap(tmp_path):
     assert (vq - k).abs().max().item() < 0.05
     import glob
     files = sorted(glob.glob(str(tmp_path / "kv_1_0_*")))
-    assert len(files) == 4  # k.bin, k.scale, v.bin, v.scale
+    assert len(files) == 4
 
 
 def test_quantized_kv_append_grows_chunk():
