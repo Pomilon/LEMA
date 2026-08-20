@@ -149,7 +149,7 @@ class FullFTManager:
         for layer_id, keys in self.selected_layer_keys.items():
             for key in keys:
                 _, name = key
-                w = self.gbi.load_tensors([name], device="cpu")[name]
+                w = self.adapter.load_tensor(self.gbi, name)
                 w = w.to(dtype).contiguous()
                 self.true_weights[key] = w
                 self.original[key] = w.clone()
@@ -275,7 +275,7 @@ class FullFTManager:
         for layer_id in layer_ids:
             names = [
                 n for n in self.adapter.get_param_names_for_layer(layer_id)
-                if self.gbi.get_tensor_shape(n) is not None
+                if self.adapter.get_tensor_shape(self.gbi, n) is not None
                 and self._match_modules(n)
                 and not (tied and n == "lm_head.weight")
             ]
@@ -297,7 +297,7 @@ class FullFTManager:
         total = 0
         for layer_id, keys in self.selected_layer_keys.items():
             for _, name in keys:
-                shape = self.gbi.get_tensor_shape(name)
+                shape = self.adapter.get_tensor_shape(self.gbi, name)
                 if shape is not None:
                     total += math.prod(shape)
         return total

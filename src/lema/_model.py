@@ -125,12 +125,12 @@ class LemaModel:
         meta = self.adapter.get_layer_metadata()
         for layer in meta:
             for name in self.adapter.get_param_names_for_layer(layer["id"]):
-                shape = self.gbi.get_tensor_shape(name)
+                shape = self.adapter.get_tensor_shape(self.gbi, name)
                 if shape is not None:
                     store.register(Stream(
                         StreamKind.WEIGHTS, layer["id"], name, tuple(shape),
                         store.dtype,
-                        source=lambda n=name: self.gbi.load_tensors([n], device="cpu")[n],
+                        source=lambda n=name: self.adapter.load_tensor(self.gbi, n),
                     ))
         return store
 

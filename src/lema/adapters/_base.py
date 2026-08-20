@@ -34,6 +34,17 @@ class LemaModelAdapter(ABC):
     @abstractmethod
     def hidden_size(self) -> int: ...
 
+    def load_tensor(self, gbi: Any, name: str) -> torch.Tensor:
+        """Load a single weight from disk. Adapters with fused module params
+        (e.g. grouped-MoE) override this to assemble tensors from per-expert
+        checkpoint keys."""
+        return gbi.load_tensors([name], device="cpu")[name]
+
+    def get_tensor_shape(self, gbi: Any, name: str) -> tuple | None:
+        """Resolve a weight's shape. Default: query the GBI (no bytes loaded).
+        Fused-param adapters override to report the fused shape."""
+        return gbi.get_tensor_shape(name)
+
     def _set_generation_mode(self) -> None:
         """Put pooled layer modules into eval mode (disables dropout) for
         deterministic generation. Adapters that create fresh modules per call

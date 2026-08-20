@@ -85,6 +85,47 @@ class Lfm2Adapter(LemaModelAdapter):
             return names
         return []
 
+    def load_tensor(self, gbi: Any, name: str) -> torch.Tensor:
+        if name in set(gbi.get_keys()):
+            return super().load_tensor(gbi, name)
+        if ".feed_forward.experts.gate_up_proj" in name:
+            prefix = name.rsplit(".experts.gate_up_proj", 1)[0]
+            per_expert = []
+            for e in range(self.hf_config.num_experts):
+                w1 = gbi.load_tensors([f"{prefix}.experts.{e}.w1.weight"], device="cpu")
+                w3 = gbi.load_tensors([f"{prefix}.experts.{e}.w3.weight"], device="cpu")
+                per_expert.append(torch.cat([w1[f"{prefix}.experts.{e}.w1.weight"],
+                                             w3[f"{prefix}.experts.{e}.w3.weight"]], dim=0))
+            return torch.stack(per_expert, dim=0)
+        if ".feed_forward.experts.down_proj" in name:
+            prefix = name.rsplit(".experts.down_proj", 1)[0]
+            per_expert = []
+            for e in range(self.hf_config.num_experts):
+                w2 = gbi.load_tensors([f"{prefix}.experts.{e}.w2.weight"], device="cpu")
+                per_expert.append(w2[f"{prefix}.experts.{e}.w2.weight"])
+            return torch.stack(per_expert, dim=0)
+        if name == "lm_head.weight" and name not in set(gbi.get_keys()):
+            embed = gbi.load_tensors(["model.embed_tokens.weight"], device="cpu")
+            return embed["model.embed_tokens.weight"]
+        return super().load_tensor(gbi, name)
+
+    def get_tensor_shape(self, gbi: Any, name: str) -> tuple | None:
+        if name in set(gbi.get_keys()):
+            return super().get_tensor_shape(gbi, name)
+        if ".feed_forward.experts.gate_up_proj" in name:
+            prefix = name.rsplit(".experts.gate_up_proj", 1)[0]
+            w1_shape = gbi.get_tensor_shape(f"{prefix}.experts.0.w1.weight")
+            if w1_shape is not None:
+                return (self.hf_config.num_experts, 2 * w1_shape[0], w1_shape[1])
+        if ".feed_forward.experts.down_proj" in name:
+            prefix = name.rsplit(".experts.down_proj", 1)[0]
+            w2_shape = gbi.get_tensor_shape(f"{prefix}.experts.0.w2.weight")
+            if w2_shape is not None:
+                return (self.hf_config.num_experts, w2_shape[0], w2_shape[1])
+        if name == "lm_head.weight" and name not in set(gbi.get_keys()):
+            return gbi.get_tensor_shape("model.embed_tokens.weight")
+        return super().get_tensor_shape(gbi, name)
+
     def construct_layer_module(self, layer_id: int, flat_buffer: torch.Tensor | None = None, lora_manager: Any = None, full_ft_manager: Any = None) -> nn.Module:
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 

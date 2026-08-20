@@ -158,7 +158,7 @@ class _TransferEngine:
         total = 0
         for name in self.adapter.get_param_names_for_layer(layer_id):
             try:
-                shape = self.gbi.get_tensor_shape(name)
+                shape = self.adapter.get_tensor_shape(self.gbi, name)
             except Exception:
                 continue
             if shape is not None:
@@ -186,8 +186,9 @@ class _TransferEngine:
             names = self.adapter.get_param_names_for_layer(layer['id'])
             layer_params = 0
             for name in names:
-                shape = self.gbi.get_tensor_shape(name)
-                layer_params += torch.Size(shape).numel()
+                shape = self.adapter.get_tensor_shape(self.gbi, name)
+                if shape is not None:
+                    layer_params += torch.Size(shape).numel()
 
             layer_gb = (layer_params * self.itemsize) / (1024**3)
             if processed_gb + layer_gb <= self.config.max_ram_gb * 0.9:
@@ -213,7 +214,7 @@ class _TransferEngine:
     def _pack_layer_to_ram(self, layer_id: int, slot: int = 0, is_resident: bool = False):
         """Load a layer from disk and pack into a flat RAM buffer."""
         param_names = self.adapter.get_param_names_for_layer(layer_id)
-        weights = self.gbi.load_tensors(param_names, device="cpu")
+        weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
 
         if is_resident:
             total_el = sum(w.numel() for w in weights.values())
