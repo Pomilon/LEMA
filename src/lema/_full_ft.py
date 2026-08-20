@@ -126,6 +126,11 @@ class FullFTManager:
             for layer_id, names in self.selected.items()
         }
         signature["grad_acc_bits"] = self.config.grad_acc_bits
+        if not signature["grad_acc_bits"]:
+            # Pre-quantization sidecars have no grad_acc_bits key: an unquantized
+            # run must match them byte-identically so reopening never wipes
+            # accumulated gradients; quantized runs still record the key.
+            del signature["grad_acc_bits"]
         fresh = False
         if os.path.exists(sidecar_path):
             try:

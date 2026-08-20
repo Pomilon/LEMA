@@ -166,7 +166,8 @@ def test_quantized_opt_state_memory_and_step(tmp_path):
     mgr.step_layer(key[0])
     q_int2, scale2 = mgr.opt_states[key]["exp_avg"]
     assert q_int2.dtype == torch.int8
-    assert torch.equal(q_int2, q_int) or not torch.equal(q_int2, q_int)
+    assert scale2.dtype == torch.float32
+    assert (scale2 > 0).all() and (q_int2 != 0).any()
 
 
 def test_quantized_opt_state_tracks_fp32_reference(tmp_path):

@@ -57,3 +57,26 @@ def test_disk_accumulator_reopen_same_selection(tmp_path):
     accs = list(m2.full_ft_manager.accumulators.values())
     assert any(torch.all(a == 0.5) for a in accs), "same-selection reopen should keep data"
     m2.full_ft_manager.close()
+
+
+def test_disk_accumulator_reopen_precommit_sidecar_not_wiped(tmp_path):
+    out = str(tmp_path / "run")
+    m1 = _build(tmp_path, ["c_attn"], ["last:1"], out)
+    m1.full_ft_manager.accumulators[list(m1.full_ft_manager.accumulators)[0]].fill_(0.5)
+    m1.full_ft_manager.close()
+
+    # Simulate a sidecar written by an older LEMA version: no grad_acc_bits key.
+    sidecar_path = os.path.join(out, "grad_accum", "selection.json")
+    with open(sidecar_path) as f:
+        import json
+        old = json.load(f)
+    old.pop("grad_acc_bits", None)
+    with open(sidecar_path, "w") as f:
+        json.dump(old, f)
+
+    # Same selection, unquantized run: pre-existing accumulator must NOT be wiped
+    m2 = _build(tmp_path, ["c_attn"], ["last:1"], out)
+    accs = list(m2.full_ft_manager.accumulators.values())
+    assert any(torch.all(a == 0.5) for a in accs), \
+        "pre-commit sidecar (missing grad_acc_bits) must not wipe accumulated gradients"
+    m2.full_ft_manager.close()
