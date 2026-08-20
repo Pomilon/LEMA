@@ -163,7 +163,7 @@ config = LemaConfig(
 
 Weights are quantized and packed in the RAM staging buffer and dequantized into the VRAM execution slot at consumption, so the disk and RAM footprint shrinks while compute stays at full precision. Full-FT optimizer states and accumulators stay quantized in RAM (including the mmap disk backend) and are dequantized only inside the per-layer AdamW step. The KV cache stores int8 values with a dynamic per-chunk scale.
 
-**Trade-offs:** int8 keeps training output within ~1% of fp16 — quantized weight relative error < 1e-2, forward max-diff < 0.1, and train loss within 0.2 of the fp16 baseline (see `tests/test_quant_streaming.py`). int4 weights trade more precision for 4× weight savings. The quantize/dequantize passes add a small per-step time cost.
+**Trade-offs:** on tiny models int8 training output stays within ~1% of fp16 (quantized weight relative error < 1e-2, forward max-diff < 0.1 — see `tests/test_quant_streaming.py`); on real models the quantized-weight error shifts the loss by a fraction of a nat at load. Weight quantization shrinks the **disk/RAM/PCIe** footprint (the dequantized compute buffer is produced in VRAM at consumption), so VRAM for the weight slots is not reduced — the int8 source plus fp32 dequant slot can exceed the unquantized bf16 buffer. The quantize/dequant passes add a real per-step time cost (up to ~10x on large models), so measure before enabling on latency-critical runs.
 
 ## Documentation
 
