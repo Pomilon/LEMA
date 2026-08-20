@@ -6,6 +6,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from safetensors.torch import save_file
 from lema import LemaModel, LemaConfig, MemoryStrategy
 from lema._config import TrainingMode
+from lema._tensorstore import KVChunkStore, chunked_attention
 
 
 def test_quant_bits_validation_accepts_off_and_valid():
@@ -198,3 +199,88 @@ def test_quantized_grad_acc_disk_backend(tmp_path):
     q_int, scale = mgr.accumulators[key]
     assert q_int.dtype == torch.int8
     assert scale.dtype == torch.float32
+
+
+def test_quantized_kv_chunk_roundtrip():
+    torch.manual_seed(0)
+    store_q = KVChunkStore(kv_chunk_size=8, bits=8)
+    store_fp = KVChunkStore(kv_chunk_size=8, bits=None)
+    k = torch.randn(1, 4, 8, 16)
+    v = torch.randn(1, 4, 8, 16)
+    store_q.stash(1, 0, k, v)
+    store_fp.stash(1, 0, k, v)
+    kq, vq = store_q.load(1, 0)
+    kf, vf = store_fp.load(1, 0)
+    assert kq.shape == k.shape and vq.shape == v.shape
+    assert (kq - kf).abs().max().item() < 0.05
+    assert (vq - vf).abs().max().item() < 0.05
+
+
+def test_quantized_kv_attention_close_to_plain(tmp_path):
+    torch.manual_seed(1)
+    q = torch.randn(1, 4, 8, 16)
+    k = torch.randn(1, 4, 32, 16)
+    v = torch.randn(1, 4, 32, 16)
+    sq = KVChunkStore(kv_chunk_size=8, bits=8)
+    sf = KVChunkStore(kv_chunk_size=8, bits=None)
+    for c in range(4):
+        sq.stash(1, c, k[:, :, c*8:(c+1)*8], v[:, :, c*8:(c+1)*8])
+        sf.stash(1, c, k[:, :, c*8:(c+1)*8], v[:, :, c*8:(c+1)*8])
+    out_q = chunked_attention(q, [sq.load(1, c) for c in range(4)])
+    out_fp = chunked_attention(q, [sf.load(1, c) for c in range(4)])
+    diff = (out_q - out_fp).abs().max().item()
+    assert diff < 0.05, f"quantized KV attention max diff {diff}"
+
+
+def test_quantized_kv_disk_mmap(tmp_path):
+    store = KVChunkStore(kv_chunk_size=8, bits=8, disk_dir=str(tmp_path), max_ram_gb=0)
+    k = torch.randn(1, 4, 8, 16)
+    store.stash(1, 0, k, k)
+    kq, vq = store.load(1, 0)
+    assert kq.shape == k.shape and vq.shape == k.shape
+    assert (kq - k).abs().max().item() < 0.05
+    assert (vq - k).abs().max().item() < 0.05
+    import glob
+    files = sorted(glob.glob(str(tmp_path / "kv_1_0_*")))
+    assert len(files) == 4  # k.bin, k.scale, v.bin, v.scale
+
+
+def test_quantized_kv_append_grows_chunk():
+    torch.manual_seed(2)
+    tokens = [(torch.randn(2, 4, 1, 16), torch.randn(2, 4, 1, 16)) for _ in range(6)]
+    store_q = KVChunkStore(kv_chunk_size=4, bits=8)
+    store_fp = KVChunkStore(kv_chunk_size=4, bits=None)
+    for store in (store_q, store_fp):
+        for k, v in tokens[:3]:
+            store.append(1, k, v)
+        assert store.current_size(1) == 3
+        assert store.num_chunks(1) == 1
+        for k, v in tokens[3:]:
+            store.append(1, k, v)
+        assert store.num_chunks(1) == 2
+    kq, vq = store_q.load(1, 0)
+    kf, vf = store_fp.load(1, 0)
+    assert kq.shape == kf.shape == (2, 4, 4, 16)
+    assert (kq - kf).abs().max().item() < 0.05
+    assert (vq - vf).abs().max().item() < 0.05
+
+
+def test_quantized_kv_disk_append_grows(tmp_path):
+    torch.manual_seed(3)
+    tokens = [(torch.randn(2, 4, 1, 16), torch.randn(2, 4, 1, 16)) for _ in range(5)]
+    store = KVChunkStore(kv_chunk_size=4, bits=8, disk_dir=str(tmp_path), max_ram_gb=0)
+    for k, v in tokens[:3]:
+        store.append(1, k, v)
+    kq, _ = store.load(1, 0)
+    assert kq.shape == (2, 4, 3, 16)
+    assert store.num_chunks(1) == 1
+    store.append(1, tokens[3][0], tokens[3][1])
+    assert store.num_chunks(1) == 1
+    kq, _ = store.load(1, 0)
+    assert kq.shape == (2, 4, 4, 16)
+    store.append(1, tokens[4][0], tokens[4][1])
+    assert store.num_chunks(1) == 2
+    kq, _ = store.load(1, 0)
+    assert kq.shape == (2, 4, 4, 16)
+    kq2, _ = store.load(1, 1)
+    assert kq2.shape == (2, 4, 1, 16)

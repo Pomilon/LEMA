@@ -537,12 +537,13 @@ class KVChunkStore:
 
     def __init__(self, kv_chunk_size: int = 8192, max_ram_gb: float = 0.0,
                  disk_dir: str | None = None, dtype: torch.dtype = torch.float32,
-                 device: str = "cpu"):
+                 device: str = "cpu", bits: int | None = None):
         self.kv_chunk_size = kv_chunk_size
         self.max_ram_gb = max_ram_gb
         self.disk_dir = disk_dir
         self.dtype = dtype
         self.device = device
+        self.bits = bits
         self._ram: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._sizes: dict[tuple[int, int], int] = {}
         self._current: dict[int, int] = {}   # layer -> current chunk_idx
@@ -557,7 +558,10 @@ class KVChunkStore:
         if self.disk_dir is None:
             return False
         if self.max_ram_gb > 0:
-            est_gb = sum(k.numel() * k.element_size() * 2 for k, _ in self._ram.values())
+            est_gb = 0.0
+            for val in self._ram.values():
+                k = val[0][0] if self.bits else val[0]
+                est_gb += k.numel() * k.element_size() * 2
             return est_gb > self.max_ram_gb * 1e9
         return True
 
@@ -574,15 +578,35 @@ class KVChunkStore:
         is_full = k.shape[2] >= self.kv_chunk_size
         self._current[layer_id] = chunk_idx + 1 if is_full else chunk_idx
         self._current_size[layer_id] = 0 if is_full else k.shape[2]
+        if self.bits:
+            from ._quant import quantize_tensor
+            kq, ks = quantize_tensor(k, self.bits)
+            vq, vs = quantize_tensor(v, self.bits)
+        else:
+            kq, ks, vq, vs = k, None, v, None
         if not self._use_disk():
-            self._ram[key] = (k.to(self.device), v.to(self.device))
+            if self.bits:
+                self._ram[key] = ((kq, ks), (vq, vs))
+            else:
+                self._ram[key] = (k.to(self.device), v.to(self.device))
             return
         import numpy as _np
         kp, vp = self._disk_paths(layer_id, chunk_idx)
-        km = _np.memmap(kp, dtype="float32", mode="w+", shape=k.shape)
-        vm = _np.memmap(vp, dtype="float32", mode="w+", shape=v.shape)
-        km[:] = k.float().numpy()
-        vm[:] = v.float().numpy()
+        if self.bits:
+            km = _np.memmap(kp, dtype="int8", mode="w+", shape=kq.shape)
+            vm = _np.memmap(vp, dtype="int8", mode="w+", shape=vq.shape)
+            km[:] = kq.numpy()
+            vm[:] = vq.numpy()
+            ks_np = _np.memmap(kp + ".scale", dtype="float32", mode="w+", shape=ks.shape)
+            vs_np = _np.memmap(vp + ".scale", dtype="float32", mode="w+", shape=vs.shape)
+            ks_np[:] = ks.numpy()
+            vs_np[:] = vs.numpy()
+            ks_np.flush(); vs_np.flush()
+        else:
+            km = _np.memmap(kp, dtype="float32", mode="w+", shape=k.shape)
+            vm = _np.memmap(vp, dtype="float32", mode="w+", shape=v.shape)
+            km[:] = k.float().numpy()
+            vm[:] = v.float().numpy()
         km.flush(); vm.flush()
         self._memmaps[key] = (km, vm)
         self._files[key] = None
@@ -590,9 +614,25 @@ class KVChunkStore:
     def load(self, layer_id: int, chunk_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         key = (layer_id, chunk_idx)
         if key in self._ram:
-            return self._ram[key]
+            k, v = self._ram[key]
+            if self.bits:
+                from ._quant import dequantize
+                return (dequantize(k[0], k[1], bits=self.bits).view(k[0].shape).to(self.device),
+                        dequantize(v[0], v[1], bits=self.bits).view(v[0].shape).to(self.device))
+            return k, v
         if key in self._memmaps:
             km, vm = self._memmaps[key]
+            if self.bits:
+                import numpy as _np
+                from ._quant import dequantize
+                kp, vp = self._disk_paths(layer_id, chunk_idx)
+                ks = _np.memmap(kp + ".scale", dtype="float32", mode="r")
+                vs = _np.memmap(vp + ".scale", dtype="float32", mode="r")
+                k_t = dequantize(torch.from_numpy(np.array(km)),
+                                 torch.from_numpy(np.array(ks)), bits=self.bits).view(km.shape)
+                v_t = dequantize(torch.from_numpy(np.array(vm)),
+                                 torch.from_numpy(np.array(vs)), bits=self.bits).view(vm.shape)
+                return k_t.to(self.device), v_t.to(self.device)
             return (torch.from_numpy(np.array(km)).to(self.dtype).to(self.device),
                     torch.from_numpy(np.array(vm)).to(self.dtype).to(self.device))
         raise KeyError(f"KV chunk not found: {key}")
@@ -612,11 +652,10 @@ class KVChunkStore:
             return
         # grow current chunk: load, concatenate, re-stash
         if not self._use_disk() and key in self._ram:
-            k_cur, v_cur = self._ram[key]
+            k_cur, v_cur = self.load(layer_id, cur)
             k_new = torch.cat([k_cur, k], dim=2)
             v_new = torch.cat([v_cur, v], dim=2)
-            self._ram[key] = (k_new, v_new)
-            self._sizes[key] = k_new.shape[2]
+            self.stash(layer_id, cur, k_new, v_new)
         else:
             k_cur, v_cur = self.load(layer_id, cur)
             k_new = torch.cat([k_cur, k], dim=2)

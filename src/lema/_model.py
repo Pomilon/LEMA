@@ -438,7 +438,8 @@ class LemaModel:
 
         inputs = tokenizer(prompt, return_tensors="pt").to(self.config.device)
         input_ids = inputs["input_ids"]
-        kv_store = KVChunkStore(kv_chunk_size=kv_chunk_size, device=self.config.device)
+        kv_store = KVChunkStore(kv_chunk_size=kv_chunk_size, device=self.config.device,
+                                bits=self.config.kv_bits or None)
 
         def prefill(ids):
             hidden = self.adapter.forward_layer(self._emb_module(), ids)
