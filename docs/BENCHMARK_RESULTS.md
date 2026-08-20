@@ -150,3 +150,22 @@ The unified streaming core: weights, optimizer states, gradient accumulators, an
 | Full unit suite | 76/76 passing (local + Kaggle) |
 
 KV-cached generation (`generate_kv`) streams per-layer KV chunks through the store, enabling long-context inference without holding the full KV cache in VRAM; chunked attention is exact (online softmax in fp32), not an approximation.
+
+## Quantization Support (T4)
+
+Per-kind quantization (`weights_bits`/`opt_state_bits`/`grad_acc_bits`/`kv_bits`; int8, plus int4 for weights) with symmetric integer + fp32 scale, quantized bytes crossing disk/RAM/PCIe and dequant at consumption. Verified in the Kaggle notebook's quant demo cell on a T4 — selective full-FT on TinyLlama 1.1B, last 2 layers q/k/v/o, 2 steps, fp16 baseline vs int8-all.
+
+| Metric | fp16 baseline | int8-all |
+|---|---|---|
+| Loss | 13.19 → 12.19 | 12.88 → 11.88 |
+| Step time | 2.72 s / 0.98 s | 21.3 s / 18.1 s |
+| Peak VRAM | 0.76 GB | 1.43 GB |
+| Peak RSS | 4.91 GB | 5.56 GB |
+
+Findings (honest trade-offs, now reflected in README/USER_GUIDE):
+
+- **Storage savings are in RAM/disk/PCIe, not VRAM**: quantized weight streams cut RAM/disk footprint ~2x (int8) / 4x (int4-weights), but the weight path keeps a fp32 dequant slot per VRAM slot, so peak VRAM rises (0.76 → 1.43 GB here). Full-FT optimizer states / accumulators / KV chunks quantize their on-RAM and on-disk representations.
+- **int8 weights are lossy at load**: first-loss gap vs baseline ~0.31 (real weights), so per-step training dynamics differ slightly.
+- **Quantize/dequant adds real per-step cost** (~10x on TinyLlama, CPU-side quantize at pack dominates and scales with model size). Measure before enabling on latency-sensitive workloads; int8-weights-only is the cheapest option.
+
+Full unit suite 137/137 passing (local + Kaggle), including the all-four-bits end-to-end train smoke test.
