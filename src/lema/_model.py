@@ -280,8 +280,8 @@ class LemaModel:
         # because T_ram_to_vram is usually much smaller and overlapping.
         needed_dist = int(math.ceil(disk_time / max(t_comp_layer, 1e-6))) + 1
 
-        # Clamp to reasonable values [1, 5] to avoid excessive RAM usage
-        self.config.prefetch_distance = max(1, min(needed_dist, 5))
+        # Clamp to reasonable values [1, 3] to avoid excessive RAM usage
+        self.config.prefetch_distance = max(1, min(needed_dist, 3))
 
         # 6. Final Strategy & Budget Decisions
         total_model_params = sum(l.get('size', 0) for l in self.adapter.get_layer_metadata())
@@ -368,7 +368,7 @@ class LemaModel:
 
         # Little's Law prefetch distance (existing logic)
         needed_dist = int(math.ceil(disk_time / max(t_comp_layer, 1e-6))) + 1
-        self.config.prefetch_distance = max(1, min(needed_dist, 5))
+        self.config.prefetch_distance = max(1, min(needed_dist, 3))
 
         if self.config.max_ram_gb <= 0:
             self.config.max_ram_gb = psutil.virtual_memory().total / (1024**3) * 0.75

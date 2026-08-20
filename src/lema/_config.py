@@ -77,6 +77,12 @@ class LemaConfig:
             self.state_strategy = StateStrategy(self.state_strategy.lower())
         self._validate_full_ft()
         self._validate_quant()
+        if not 1 <= self.prefetch_distance <= 3:
+            raise ValueError(
+                f"Invalid prefetch_distance: {self.prefetch_distance!r}. "
+                "Only 2 RAM slots exist; values above 3 cause silent wrong-weight "
+                "transfers. Allowed: 1, 2, 3."
+            )
 
     def _validate_quant(self):
         for field, allowed in (("weights_bits", (None, 0, 4, 8)),

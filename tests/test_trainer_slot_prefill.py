@@ -6,7 +6,7 @@ from lema import LemaConfig, LemaModel, LemaTrainer, MemoryStrategy
 from lema._config import TrainingMode
 
 
-def _build(tmp_path, prefetch_distance):
+def _build_llama(tmp_path, **cfg_kwargs):
     torch.manual_seed(0)
     cfg = LlamaConfig(vocab_size=100, hidden_size=32, intermediate_size=64,
                       num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
@@ -17,12 +17,17 @@ def _build(tmp_path, prefetch_distance):
     os.makedirs(model_dir, exist_ok=True)
     save_file(sd, str(model_dir / "model.safetensors"))
     cfg.save_pretrained(str(model_dir))
-    lc = LemaConfig(model_name_or_path=str(model_dir), model_type="llama",
+    defaults = dict(model_name_or_path=str(model_dir), model_type="llama",
                     gbi_path=str(model_dir / "model.safetensors"), device="cpu",
                     strategy=MemoryStrategy.STREAMING, max_vram_gb=4.0,
-                    prefetch_distance=prefetch_distance, training_mode=TrainingMode.LORA,
+                    training_mode=TrainingMode.LORA,
                     output_dir=str(tmp_path / "out"), learning_rate=1e-3)
-    model = LemaModel(lc)
+    defaults.update(cfg_kwargs)
+    return LemaModel(LemaConfig(**defaults))
+
+
+def _build(tmp_path, prefetch_distance):
+    model = _build_llama(tmp_path, prefetch_distance=prefetch_distance)
     trainer = LemaTrainer(
         config=model.config,
         model_adapter=model.adapter,
@@ -30,7 +35,7 @@ def _build(tmp_path, prefetch_distance):
         lora_manager=model.lora_manager,
         store=model.store,
     )
-    return trainer, lc
+    return trainer, model.config
 
 
 def test_train_step_weights_match_at_prefetch_distance_3(tmp_path):
@@ -42,3 +47,24 @@ def test_train_step_weights_match_at_prefetch_distance_3(tmp_path):
     trainer2, _ = _build(tmp_path, prefetch_distance=2)
     _, loss_b = trainer2.train_step(input_ids, labels)
     assert abs(loss_a - loss_b) < 1e-3, f"dist=3 loss {loss_a} diverges from dist=2 {loss_b}"
+
+
+class _SlowDiskClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def perf_counter(self):
+        self.t += 1.0
+        return self.t
+
+
+def test_auto_tune_clamps_prefetch_distance_to_3(tmp_path, monkeypatch):
+    model = _build_llama(tmp_path)
+    model.initialize_lora()
+    model.config.prefetch_distance = 1
+    monkeypatch.setattr("lema._model.time", _SlowDiskClock())
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+    model.tune_budgets()
+    assert 1 <= model.config.prefetch_distance <= 3
+    model.simulate_and_optimize()
+    assert 1 <= model.config.prefetch_distance <= 3

@@ -29,3 +29,18 @@ def test_valid_backends_ok():
     for b in ("auto", "ram", "disk"):
         c = LemaConfig(model_name_or_path="x", grad_accum_backend=b)
         assert c.grad_accum_backend == b
+
+
+def test_prefetch_distance_rejects_above_3():
+    with pytest.raises(ValueError, match="prefetch_distance"):
+        LemaConfig(model_name_or_path="x", prefetch_distance=4)
+    with pytest.raises(ValueError, match="prefetch_distance"):
+        LemaConfig(model_name_or_path="x", prefetch_distance=5)
+    LemaConfig(model_name_or_path="x", prefetch_distance=3)
+
+
+def test_prefetch_distance_rejects_below_1():
+    with pytest.raises(ValueError, match="prefetch_distance"):
+        LemaConfig(model_name_or_path="x", prefetch_distance=0)
+    with pytest.raises(ValueError, match="prefetch_distance"):
+        LemaConfig(model_name_or_path="x", prefetch_distance=-1)
