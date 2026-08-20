@@ -52,3 +52,15 @@ def test_fallback_when_ext_missing(monkeypatch):
     with pytest.raises(RuntimeError):
         _w8a8.native_int8_gemm(torch.zeros(4, 4, dtype=torch.int8),
                                torch.zeros(4, 4, dtype=torch.int8))
+
+
+def test_native_int8_gemm_cuda_matches_fp32_reference():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.manual_seed(4)
+    M, K, N = 512, 1024, 512
+    a = (torch.randn(M, K, device="cuda") * 3).round().to(torch.int8)
+    b = (torch.randn(K, N, device="cuda") * 3).round().to(torch.int8)
+    out = _w8a8.native_int8_gemm(a, b)
+    ref = (a.float() @ b.float()).to(torch.int32)
+    assert torch.equal(out.cpu(), ref.cpu())

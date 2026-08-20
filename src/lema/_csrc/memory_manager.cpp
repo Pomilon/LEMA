@@ -1,5 +1,6 @@
 #include "memory_manager.h"
 #include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <stdexcept>
@@ -200,6 +201,12 @@ void LemaMemoryManager::worker_loop() {
 
 } // namespace lema
 
+extern "C" void int8_gemm_cuda(const int8_t* a, const int8_t* b,
+                               int64_t M, int64_t K, int64_t N,
+                               int32_t* out, cudaStream_t stream);
+extern "C" void quantize_act_cuda(const float* x, int64_t n,
+                                  int8_t* q, float* scale, cudaStream_t stream);
+
 // --- Pybind11 Module ---
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<lema::LemaMemoryManager>(m, "LemaMemoryManager")
@@ -215,4 +222,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("wait_for_prefetch", &lema::LemaMemoryManager::wait_for_prefetch)
         .def("is_layer_in_ram", &lema::LemaMemoryManager::is_layer_in_ram)
         .def("synchronize_all", &lema::LemaMemoryManager::synchronize_all);
+    m.def("int8_gemm_cuda", [](torch::Tensor a, torch::Tensor b, int64_t M,
+                               int64_t K, int64_t N, torch::Tensor out) {
+        at::cuda::CUDAGuard guard(a.device());
+        int8_gemm_cuda(reinterpret_cast<const int8_t*>(a.data_ptr()),
+                       reinterpret_cast<const int8_t*>(b.data_ptr()),
+                       M, K, N,
+                       reinterpret_cast<int32_t*>(out.data_ptr()),
+                       at::cuda::getCurrentCUDAStream());
+    });
+    m.def("quantize_act_cuda", [](torch::Tensor x, int64_t n,
+                                  torch::Tensor q, torch::Tensor scale) {
+        at::cuda::CUDAGuard guard(x.device());
+        quantize_act_cuda(reinterpret_cast<const float*>(x.data_ptr()), n,
+                          reinterpret_cast<int8_t*>(q.data_ptr()),
+                          reinterpret_cast<float*>(scale.data_ptr()),
+                          at::cuda::getCurrentCUDAStream());
+    });
 }
