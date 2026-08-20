@@ -58,6 +58,10 @@ class LemaConfig:
     target_step_time_ms: float = 0.0
     target_tokens_per_sec: float = 0.0
     kv_chunk_size: int = 8192
+    weights_bits: int | None = None
+    opt_state_bits: int | None = None
+    grad_acc_bits: int | None = None
+    kv_bits: int | None = None
 
     def __post_init__(self):
         if self.gbi_path is None:
@@ -72,6 +76,18 @@ class LemaConfig:
         if isinstance(self.state_strategy, str):
             self.state_strategy = StateStrategy(self.state_strategy.lower())
         self._validate_full_ft()
+        self._validate_quant()
+
+    def _validate_quant(self):
+        for field, allowed in (("weights_bits", (None, 0, 4, 8)),
+                               ("opt_state_bits", (None, 0, 8)),
+                               ("grad_acc_bits", (None, 0, 8)),
+                               ("kv_bits", (None, 0, 8))):
+            val = getattr(self, field)
+            if val not in allowed:
+                raise ValueError(
+                    f"Invalid {field}: {val!r}. Allowed: {[a for a in allowed if a is not None]}"
+                )
 
     def _validate_full_ft(self):
         if self.grad_accum_backend not in ("auto", "ram", "disk"):
