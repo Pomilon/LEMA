@@ -85,7 +85,8 @@ class LemaTrainer:
         # Phase 1: Initial Prefetch
         for j in range(min(dist, len(self.layers))):
             self.memory.prefetch_to_ram(self.layers[j]['id'], slot=j % 2)
-        self.memory.async_transfer_to_vram(self.layers[0]['id'], vram_slot=0, ram_slot=0)
+            if j == 0:
+                self.memory.async_transfer_to_vram(self.layers[j]['id'], vram_slot=0, ram_slot=j % 2)
 
         hidden_states = inputs
 
@@ -126,7 +127,8 @@ class LemaTrainer:
 
         for j in range(last_idx, max(-1, last_idx - dist), -1):
             self.memory.prefetch_to_ram(self.layers[j]['id'], slot=j % 2)
-        self.memory.async_transfer_to_vram(self.layers[last_idx]['id'], vram_slot=0, ram_slot=last_idx % 2)
+            if j == last_idx:
+                self.memory.async_transfer_to_vram(self.layers[j]['id'], vram_slot=0, ram_slot=j % 2)
 
         grad_output = None
         for i in range(last_idx, -1, -1):
