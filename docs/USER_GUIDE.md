@@ -172,7 +172,9 @@ for batch in dataloader:
 model.close()
 ```
 
-Quantized training tracks the fp16 baseline closely (int8 forward max-diff < 0.1; train loss within 0.2 of fp16). For the largest weight savings on memory-bound inference/streaming, set `weights_bits=4` — int4 packs two weights per byte — at a slightly larger precision cost. The quantize/dequantize passes add a small per-step overhead, so enable quantization when memory (VRAM/RAM) is the bottleneck.
+Quantized training tracks the fp16 baseline closely (int8 forward max-diff < 0.1; train loss within 0.2 of fp16). For the largest weight savings on memory-bound inference/streaming, set `weights_bits=4` — int4 packs two weights per byte — at a slightly larger precision cost.
+
+**Native W8A8 compute:** when `weights_bits=8` and the native kernels are available (built automatically: AVX2 on CPU, DP4A on CUDA), llama decoder layers run **directly on int8**: the transfer engine hands raw int8 buffers to int8×int8→int32 GEMM kernels with a fused scale epilogue — no fp32 dequant slot. Weight bytes halve on disk, RAM, PCIe, and VRAM at once. Without native kernels (or for int4, training-time full-FT layers, embedding/head layers, and generation KV paths) weights dequantize at consumption instead. LoRA adapters are not yet supported on int8 buffers and fail loudly if combined.
 
 ## 7. Tips for Maximum Efficiency
 

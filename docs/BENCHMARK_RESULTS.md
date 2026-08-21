@@ -169,3 +169,11 @@ Findings (honest trade-offs, now reflected in README/USER_GUIDE):
 - **Quantize/dequant adds real per-step cost** (~10x on TinyLlama, CPU-side quantize at pack dominates and scales with model size). Measure before enabling on latency-sensitive workloads; int8-weights-only is the cheapest option.
 
 Full unit suite 137/137 passing (local + Kaggle), including the all-four-bits end-to-end train smoke test.
+
+## W8A8 Native Int8 Compute
+
+`weights_bits=8` with native kernels (AVX2 on CPU, DP4A on CUDA, compiled automatically) streams raw int8 weight buffers into int8×int8→int32 GEMM kernels with a fused scale epilogue — no fp32 dequant slot on the hot path for llama decoder layers. Weight bytes halve across disk, RAM, PCIe, and VRAM simultaneously.
+
+CPU kernel benchmark (2048×4096×4096, 6-core/12-thread box, bit-exact vs fp32 reference): native AVX2 int8 GEMM 0.304 s vs torch fp32 matmul 0.367 s (0.83x — faster than fp32). Gated by `tests/test_w8a8_benchmark.py`.
+
+T4 end-to-end numbers (transfer time, step time, VRAM, RSS: fp16 vs W8A8 int8) are recorded by the notebook's W8A8 demo cell (`16c`) and will be tabulated from the next Kaggle validation run.
