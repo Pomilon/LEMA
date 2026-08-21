@@ -65,7 +65,8 @@ class LlamaAdapter(LemaModelAdapter):
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         if (1 <= layer_id <= self.hf_config.num_hidden_layers
-                and flat_buffer is not None and flat_buffer.dtype == torch.int8):
+                and flat_buffer is not None and flat_buffer.dtype == torch.int8
+                and lora_manager is None and full_ft_manager is None):
             return self._construct_quantized_layer(layer_id, flat_buffer)
 
         # Pop matching module from sliding-window pool, or create on CPU

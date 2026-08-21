@@ -1,10 +1,12 @@
 import os
+import math
 import torch
 import pytest
 from transformers import LlamaConfig, LlamaForCausalLM
 from safetensors.torch import save_file
-from lema import LemaModel, LemaConfig, MemoryStrategy
+from lema import LemaModel, LemaConfig, LemaTrainer, MemoryStrategy
 from lema import _w8a8
+from lema._config import TrainingMode
 from lema._quantized_linear import QuantizedLinear
 
 
@@ -120,3 +122,24 @@ def test_w8a8_emb_head_stay_dequantized(tmp_path):
     h = emb(ids)
     logits = head(h)
     assert logits.shape == (1, 8, 100)
+
+
+def test_lora_training_with_w8a8_uses_dequant_path_and_creates_lora(tmp_path):
+    torch.manual_seed(0)
+    model = _build_llama(tmp_path, weights_bits=8, training_mode=TrainingMode.LORA,
+                         output_dir=str(tmp_path / "out"))
+    trainer = LemaTrainer(config=model.config, model_adapter=model.adapter, gbi=model.gbi,
+                          lora_manager=model.lora_manager, store=model.store)
+    ids = torch.randint(0, 50, (1, 16))
+    _, loss = trainer.train_step(ids, labels=ids.clone())
+    assert loss is not None and math.isfinite(loss) and loss > 0
+    assert trainer.lora_manager.params, "LoRA params silently dropped under W8A8"
+    tr = model.store.transfer
+    tr.prefetch_to_ram(1, slot=0)
+    tr.async_transfer_to_vram(1, vram_slot=0, ram_slot=0)
+    flat_fp32 = tr.get_vram_flat_buffer(0, allow_quantized=False)
+    assert flat_fp32.dtype.is_floating_point
+    assert tr.get_vram_flat_buffer(0).dtype == torch.int8
+    block = model.adapter.construct_layer_module(1, flat_fp32, model.lora_manager, None)
+    q_proj = block.self_attn.q_proj
+    assert hasattr(q_proj, "lora_A") and hasattr(q_proj, "lora_B")

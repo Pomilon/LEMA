@@ -329,7 +329,7 @@ class _TransferEngine:
             else:
                 vram_buf[:ram_buf.numel()].copy_(ram_buf)
 
-    def get_vram_flat_buffer(self, vram_slot: int) -> torch.Tensor:
+    def get_vram_flat_buffer(self, vram_slot: int, allow_quantized: bool = True) -> torch.Tensor:
         """Stage 3: Wait for transfer to complete and return VRAM buffer."""
         if self.use_cpp:
             event_id = self._transfer_event_ids.pop(vram_slot, -1)
@@ -340,7 +340,8 @@ class _TransferEngine:
                 self.transfer_streams[vram_slot].synchronize()
         if self.quant_bits:
             layer_id = self._vram_layer_ids.get(vram_slot)
-            if (self._use_native_w8a8()
+            if (allow_quantized
+                    and self._use_native_w8a8()
                     and layer_id is not None
                     and self.adapter.supports_quantized_layer(layer_id)
                     and not getattr(self.adapter, "_is_generation_mode", lambda: False)()):
