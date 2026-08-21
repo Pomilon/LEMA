@@ -65,8 +65,9 @@ def test_quantized_weight_stream_loads_and_matches(tmp_path):
     # compare against fp16 baseline weights from disk
     q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
     w_ref = q["model.layers.0.self_attn.q_proj.weight"]
-    w_lema = block.self_attn.q_proj.weight.detach()
-    rel = (w_lema.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    lin = block.self_attn.q_proj
+    w_lema = lin.weight_int8.detach().t().float() * lin.scale_w.view(-1, 1)
+    rel = (w_lema - w_ref.float()).abs().max() / w_ref.float().abs().max()
     assert rel.item() < 1e-2, f"quantized weight rel error {rel.item()}"
 
 
@@ -133,7 +134,9 @@ def test_ram_slot_repack_does_not_corrupt_vram_dequant(tmp_path):
     block = model.adapter.construct_layer_module(layer_a, flat, None)
     q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
     w_ref = q["model.layers.0.self_attn.q_proj.weight"]
-    rel = (block.self_attn.q_proj.weight.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    lin = block.self_attn.q_proj
+    w_lema = lin.weight_int8.detach().t().float() * lin.scale_w.view(-1, 1)
+    rel = (w_lema - w_ref.float()).abs().max() / w_ref.float().abs().max()
     assert rel.item() < 1e-2, f"dequant corrupted by slot repack: rel error {rel.item()}"
 
 
@@ -147,7 +150,9 @@ def test_cross_slot_vram_transfer_dequant_matches(tmp_path):
     block = model.adapter.construct_layer_module(layer_id, flat, None)
     q = model.gbi.load_tensors(["model.layers.0.self_attn.q_proj.weight"], device="cpu")
     w_ref = q["model.layers.0.self_attn.q_proj.weight"]
-    rel = (block.self_attn.q_proj.weight.float() - w_ref.float()).abs().max() / w_ref.float().abs().max()
+    lin = block.self_attn.q_proj
+    w_lema = lin.weight_int8.detach().t().float() * lin.scale_w.view(-1, 1)
+    rel = (w_lema - w_ref.float()).abs().max() / w_ref.float().abs().max()
     assert rel.item() < 1e-2, f"cross-slot dequant rel error {rel.item()}"
 
 

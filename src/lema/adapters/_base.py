@@ -8,6 +8,7 @@ import torch.nn as nn
 
 class LemaModelAdapter(ABC):
     MODEL_TYPE: str = ""
+    supports_quantized: bool = False
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
@@ -44,6 +45,10 @@ class LemaModelAdapter(ABC):
         """Resolve a weight's shape. Default: query the GBI (no bytes loaded).
         Fused-param adapters override to report the fused shape."""
         return gbi.get_tensor_shape(name)
+
+    def supports_quantized_layer(self, layer_id: int) -> bool:
+        """Whether W8A8 compute applies to this layer (vs. dequantized weights)."""
+        return False
 
     def _set_generation_mode(self) -> None:
         """Put pooled layer modules into eval mode (disables dropout) for

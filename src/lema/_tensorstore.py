@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
 
-from ._config import LemaConfig, MemoryStrategy
+from ._config import LemaConfig, MemoryStrategy, TrainingMode
 from ._utils._logger import logger
+from . import _w8a8
 
 try:
     from ._csrc import _lema_cpp
@@ -73,6 +74,7 @@ class _TransferEngine:
 
         self.quant_bits = self.config.weights_bits if self.config.weights_bits else None
         self.ram_scales: dict[int, torch.Tensor] = {}
+        self.adapter.transfer_engine = self
 
         self.itemsize = torch.tensor([], dtype=self.dtype).element_size()
         self.max_params = self._calculate_max_params()
@@ -97,7 +99,7 @@ class _TransferEngine:
             logger.warning(f"LEMA: VRAM slots ({2 * slot_size_gb:.2f} GB) exceed budget ({self.config.max_vram_gb:.2f} GB)")
 
         self.vram_flat_buffers = [
-            torch.empty(self.max_params, device=self.device, dtype=self.dtype)
+            torch.empty(self.max_params, device=self.device, dtype=self._vram_buffer_dtype())
             for _ in range(2)
         ]
 
@@ -219,6 +221,14 @@ class _TransferEngine:
                 self.cpp_mgr.register_ram_buffer(1000 + i, buf)
         self.ram_layer_ids = [-1, -1]
 
+    def _vram_buffer_dtype(self) -> torch.dtype:
+        return torch.int8 if self._use_native_w8a8() else self.dtype
+
+    def _use_native_w8a8(self) -> bool:
+        return (self.quant_bits == 8 and _w8a8.HAS_NATIVE
+                and getattr(self.adapter, "supports_quantized", False)
+                and self.config.training_mode != TrainingMode.SELECTIVE_FULL)
+
     def _pack_layer_to_ram(self, layer_id: int, slot: int = 0, is_resident: bool = False):
         """Load a layer from disk and pack into a flat RAM buffer."""
         param_names = self.adapter.get_param_names_for_layer(layer_id)
@@ -325,15 +335,18 @@ class _TransferEngine:
             event_id = self._transfer_event_ids.pop(vram_slot, -1)
             if event_id >= 0:
                 self.cpp_mgr.wait_vram_transfer(event_id)
-            if self.quant_bits:
-                return self._dequant_slot(vram_slot)
-            return self.vram_flat_buffers[vram_slot]
         else:
             if self.is_cuda and self.transfer_streams:
                 self.transfer_streams[vram_slot].synchronize()
-            if self.quant_bits:
-                return self._dequant_slot(vram_slot)
-            return self.vram_flat_buffers[vram_slot]
+        if self.quant_bits:
+            layer_id = self._vram_layer_ids.get(vram_slot)
+            if (self._use_native_w8a8()
+                    and layer_id is not None
+                    and self.adapter.supports_quantized_layer(layer_id)
+                    and not getattr(self.adapter, "_is_generation_mode", lambda: False)()):
+                return self.vram_flat_buffers[vram_slot]
+            return self._dequant_slot(vram_slot)
+        return self.vram_flat_buffers[vram_slot]
 
     def _dequant_slot(self, vram_slot: int) -> torch.Tensor:
         if vram_slot not in self.vram_dequant:
@@ -386,7 +399,7 @@ class _TransferEngine:
 
     def clear_vram_slot(self, vram_slot: int):
         self.vram_flat_buffers[vram_slot] = torch.empty(
-            self.max_params, device=self.device, dtype=self.dtype
+            self.max_params, device=self.device, dtype=self._vram_buffer_dtype()
         )
         self._transfer_event_ids.pop(vram_slot, None)
         self.vram_dequant.pop(vram_slot, None)
