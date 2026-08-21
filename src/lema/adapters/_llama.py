@@ -65,9 +65,13 @@ class LlamaAdapter(LemaModelAdapter):
         device = flat_buffer.device if flat_buffer is not None else torch.device("cpu")
 
         if (1 <= layer_id <= self.hf_config.num_hidden_layers
-                and flat_buffer is not None and flat_buffer.dtype == torch.int8
-                and lora_manager is None and full_ft_manager is None):
-            return self._construct_quantized_layer(layer_id, flat_buffer)
+                and flat_buffer is not None and flat_buffer.dtype == torch.int8):
+            if lora_manager is not None:
+                raise RuntimeError(
+                    "LoRA adapters are not supported on W8A8 int8 buffers; "
+                    "use allow_quantized=False to receive dequantized weights"
+                )
+            return self._construct_quantized_layer(layer_id, flat_buffer, full_ft_manager)
 
         # Pop matching module from sliding-window pool, or create on CPU
         module = None
@@ -128,7 +132,7 @@ class LlamaAdapter(LemaModelAdapter):
     def supports_quantized_layer(self, layer_id: int) -> bool:
         return 1 <= layer_id <= self.hf_config.num_hidden_layers
 
-    def _construct_quantized_layer(self, layer_id: int, flat: torch.Tensor) -> nn.Module:
+    def _construct_quantized_layer(self, layer_id: int, flat: torch.Tensor, full_ft_manager: Any = None) -> nn.Module:
         module = QuantizedLlamaLayer(self.hf_config)
         module.to(device=flat.device)
         transfer = getattr(self, "transfer_engine", None)
@@ -182,6 +186,8 @@ class LlamaAdapter(LemaModelAdapter):
                         s_off += 1
                         continue
                 raise KeyError(f"Unmapped quantized param {full_name}")
+        if full_ft_manager is not None:
+            full_ft_manager.apply_to_module(layer_id, module)
         if self._is_generation_mode():
             module.eval()
         return module

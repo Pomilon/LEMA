@@ -233,8 +233,19 @@ class FullFTManager:
         return self.accumulators[key]
 
     def apply_to_module(self, layer_id: int, module) -> None:
+        from ._quantized_linear import QuantizedLinear
         name_to_key = self.module_name_to_key.get(layer_id, {})
+        handled = set()
+        for path, mod in module.named_modules():
+            if isinstance(mod, QuantizedLinear):
+                handled.add(path + ".weight_int8")
+                key = name_to_key.get(path + ".weight")
+                if key is not None:
+                    mod.set_int8_weight(self.true_weights[key])
         for name, param in module.named_parameters():
+            if name in handled:
+                param.requires_grad_(False)
+                continue
             key = name_to_key.get(name)
             if key is not None:
                 param.requires_grad_(True)

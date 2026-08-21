@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
 
-from ._config import LemaConfig, MemoryStrategy, TrainingMode
+from ._config import LemaConfig, MemoryStrategy
 from ._utils._logger import logger
 from . import _w8a8
 
@@ -226,8 +226,7 @@ class _TransferEngine:
 
     def _use_native_w8a8(self) -> bool:
         return (self.quant_bits == 8 and _w8a8.HAS_NATIVE
-                and getattr(self.adapter, "supports_quantized", False)
-                and self.config.training_mode != TrainingMode.SELECTIVE_FULL)
+                and getattr(self.adapter, "supports_quantized", False))
 
     def _pack_layer_to_ram(self, layer_id: int, slot: int = 0, is_resident: bool = False):
         """Load a layer from disk and pack into a flat RAM buffer."""
