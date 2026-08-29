@@ -232,9 +232,9 @@ class _TransferEngine:
         """Load a layer from disk and pack into a flat RAM buffer."""
         param_names = self.adapter.get_param_names_for_layer(layer_id)
         if self.quant_bits:
-            from ._quant import quantize_tensor
+            from ._quant_backend import quantize_tensor_with_backend
             weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
-            quant_weights = {n: quantize_tensor(w, self.quant_bits) for n, w in weights.items()}
+            quant_weights = {n: quantize_tensor_with_backend(w, self.quant_bits, backend=getattr(self.config, "quant_backend", "custom")) for n, w in weights.items()}
         else:
             weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
             quant_weights = None

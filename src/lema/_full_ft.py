@@ -9,6 +9,7 @@ import torch
 
 from ._config import LemaConfig, TrainingMode
 from ._quant import quantize_tensor, dequantize
+from ._quant_backend import dequantize_with_backend, quantize_tensor_with_backend
 from ._tensorstore import Stream, StreamKind
 from ._utils._logger import logger
 
@@ -57,7 +58,7 @@ class FullFTManager:
 
     def _deq(self, x, shape, bits):
         if isinstance(x, tuple):
-            return dequantize(x[0], x[1], bits=bits).reshape(shape)
+            return dequantize_with_backend(x[0], x[1], bits=bits, backend="custom").reshape(shape)
         return x
 
     def _deq_acc(self, x, key):
@@ -65,10 +66,13 @@ class FullFTManager:
             return self._deq(x, self.true_weights[key].shape, self.config.grad_acc_bits or 8)
         return x
 
+    def _qw(self, tensor, bits):
+        return quantize_tensor_with_backend(tensor, bits, backend="custom")
+
     def _restore_state_val(self, s, name, shape):
         scale = s.get(f"{name}.scale")
         if scale is not None:
-            return dequantize(s[name], scale, bits=8).reshape(shape)
+            return dequantize_with_backend(s[name], scale, bits=8, backend="custom").reshape(shape)
         return s[name]
 
     def _register_streams(self) -> None:
@@ -205,8 +209,8 @@ class FullFTManager:
                 self.original[key] = w.clone()
                 if opt_bits:
                     self.opt_states[key] = {
-                        "exp_avg": quantize_tensor(torch.zeros_like(w, dtype=torch.float32), opt_bits),
-                        "exp_avg_sq": quantize_tensor(torch.zeros_like(w, dtype=torch.float32), opt_bits),
+                        "exp_avg": self._qw(torch.zeros_like(w, dtype=torch.float32), opt_bits),
+                        "exp_avg_sq": self._qw(torch.zeros_like(w, dtype=torch.float32), opt_bits),
                     }
                 else:
                     self.opt_states[key] = {
@@ -214,7 +218,7 @@ class FullFTManager:
                         "exp_avg_sq": torch.zeros_like(w, dtype=torch.float32),
                     }
                 if acc_bits:
-                    self.accumulators[key] = quantize_tensor(torch.zeros_like(w, dtype=torch.float32), acc_bits)
+                    self.accumulators[key] = self._qw(torch.zeros_like(w, dtype=torch.float32), acc_bits)
                 else:
                     self.accumulators[key] = torch.zeros_like(w, dtype=torch.float32)
 
@@ -263,7 +267,7 @@ class FullFTManager:
                 if isinstance(acc, tuple):
                     g = param.grad.float().to(acc[0].device)
                     deq = self._deq_acc(acc, key).to(acc[0].device)
-                    q, s = quantize_tensor(deq + g, acc_bits)
+                    q, s = self._qw(deq + g, acc_bits)
                     acc[0].copy_(q)
                     acc[1].copy_(s)
                 else:
@@ -280,7 +284,7 @@ class FullFTManager:
             for k in keys:
                 acc = self.get_accumulator(k)
                 if isinstance(acc, tuple):
-                    q, s = quantize_tensor(self._deq_acc(acc, k) * coeff, acc_bits)
+                    q, s = self._qw(self._deq_acc(acc, k) * coeff, acc_bits)
                     acc[0].copy_(q)
                     acc[1].copy_(s)
                 else:
@@ -313,13 +317,13 @@ class FullFTManager:
             w_dev.addcdiv_(m, denom, value=-(lr / b1))
             w.copy_(w_dev.to(w.dtype))
             if opt_bits:
-                self.opt_states[key]["exp_avg"] = quantize_tensor(m.cpu(), opt_bits)
-                self.opt_states[key]["exp_avg_sq"] = quantize_tensor(v.cpu(), opt_bits)
+                self.opt_states[key]["exp_avg"] = self._qw(m.cpu(), opt_bits)
+                self.opt_states[key]["exp_avg_sq"] = self._qw(v.cpu(), opt_bits)
             else:
                 state["exp_avg"].copy_(m)
                 state["exp_avg_sq"].copy_(v)
             if acc_bits:
-                q, s = quantize_tensor(torch.zeros_like(w, dtype=torch.float32), acc_bits)
+                q, s = self._qw(torch.zeros_like(w, dtype=torch.float32), acc_bits)
                 acc_q, acc_s = self.get_accumulator(key)
                 acc_q.copy_(q)
                 acc_s.copy_(s)
@@ -473,8 +477,8 @@ class FullFTManager:
             m = self._restore_state_val(s, "exp_avg", shape)
             v = self._restore_state_val(s, "exp_avg_sq", shape)
             if opt_bits:
-                target["exp_avg"] = quantize_tensor(m, opt_bits)
-                target["exp_avg_sq"] = quantize_tensor(v, opt_bits)
+                target["exp_avg"] = self._qw(m, opt_bits)
+                target["exp_avg_sq"] = self._qw(v, opt_bits)
             else:
                 target["exp_avg"].copy_(m)
                 target["exp_avg_sq"].copy_(v)
