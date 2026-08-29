@@ -141,15 +141,13 @@ class MixtralAdapter(LemaModelAdapter):
                 if clean == "input_layernorm.weight":
                     n = module.input_layernorm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.input_layernorm.weight.shape)
-                    module.input_layernorm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.input_layernorm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "post_attention_layernorm.weight":
                     n = module.post_attention_layernorm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.post_attention_layernorm.weight.shape)
-                    module.post_attention_layernorm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.post_attention_layernorm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "self_attn.q_proj.weight":

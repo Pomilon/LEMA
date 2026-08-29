@@ -156,15 +156,13 @@ class Lfm2Adapter(LemaModelAdapter):
                 if clean == "operator_norm.weight":
                     n = module.operator_norm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.operator_norm.weight.shape)
-                    module.operator_norm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.operator_norm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "ffn_norm.weight":
                     n = module.ffn_norm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.ffn_norm.weight.shape)
-                    module.ffn_norm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.ffn_norm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "self_attn.q_proj.weight":
@@ -194,15 +192,13 @@ class Lfm2Adapter(LemaModelAdapter):
                 if clean == "self_attn.q_layernorm.weight":
                     n = module.self_attn.q_layernorm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.self_attn.q_layernorm.weight.shape)
-                    module.self_attn.q_layernorm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.self_attn.q_layernorm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "self_attn.k_layernorm.weight":
                     n = module.self_attn.k_layernorm.weight.numel()
                     q_slice = flat[offset:offset + n].view(module.self_attn.k_layernorm.weight.shape)
-                    module.self_attn.k_layernorm.weight.data.copy_(
-                        q_slice.float() * scale_all[s_off:s_off + 1].view(-1), non_blocking=True)
+                    module.self_attn.k_layernorm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                     offset += n; s_off += 1
                     continue
                 if clean == "conv.conv.weight":

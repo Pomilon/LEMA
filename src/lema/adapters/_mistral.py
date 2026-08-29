@@ -110,10 +110,7 @@ class MistralAdapter(LemaModelAdapter):
                     if norm is not None:
                         n = norm.weight.numel()
                         q_slice = flat[offset:offset + n].view(norm.weight.shape)
-                        norm.weight.data.copy_(
-                            q_slice.float() * scale_all[s_off:s_off + 1].view(-1),
-                            non_blocking=True,
-                        )
+                        norm.weight.data = (q_slice.float() * scale_all[s_off:s_off + 1].view(-1)).to(transfer.dtype)
                         offset += n
                         s_off += 1
                         continue
