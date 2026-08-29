@@ -12,20 +12,27 @@ class _W8A8LinearFn(torch.autograd.Function):
     def forward(ctx, x, weight_int8, scale_w):
         ctx.save_for_backward(weight_int8, scale_w)
         ctx.x_shape = x.shape
+        ctx.orig_dtype = x.dtype
         q, scale_a = _w8a8.quantize_act(x)
         ctx.scale_a = scale_a
         acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), weight_int8)
         out = _w8a8.apply_scale(acc, scale_w, scale_a)
         out = out.reshape(*x.shape[:-1], scale_w.shape[0])
+        if out.dtype != ctx.orig_dtype:
+            out = out.to(ctx.orig_dtype)
         return out
 
     @staticmethod
     def backward(ctx, grad_out):
         weight_int8, scale_w = ctx.saved_tensors
         w_fp = weight_int8.float() * scale_w.view(1, -1)
+        if w_fp.dtype != grad_out.dtype:
+            w_fp = w_fp.to(grad_out.dtype)
         grad_out_2d = grad_out.reshape(-1, grad_out.shape[-1])
         grad_x_2d = grad_out_2d @ w_fp.t()
         grad_x = grad_x_2d.reshape(ctx.x_shape)
+        if grad_x.dtype != ctx.orig_dtype:
+            grad_x = grad_x.to(ctx.orig_dtype)
         return grad_x, None, None
 
 
@@ -53,18 +60,23 @@ class QuantizedLinear(nn.Module):
         self.scale_w.data.copy_(scale.float().to(self.scale_w.device).view(-1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_dtype = x.dtype
         x = x.to(self.weight_int8.device)
         if _w8a8.HAS_NATIVE and x.device.type in ("cpu", "cuda"):
             if torch.is_grad_enabled() and x.requires_grad:
                 out = _W8A8LinearFn.apply(x, self.weight_int8, self.scale_w)
                 if self.bias is not None:
                     out = out + self.bias
+                if out.dtype != orig_dtype:
+                    out = out.to(orig_dtype)
                 return out
             if torch.is_grad_enabled() and not x.requires_grad:
                 q, scale_a = _w8a8.quantize_act(x)
                 acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
                 out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
                 out = out.reshape(*x.shape[:-1], self.out_features)
+                if out.dtype != orig_dtype:
+                    out = out.to(orig_dtype)
                 if self.bias is not None:
                     out = out + self.bias
                 return out
@@ -73,11 +85,15 @@ class QuantizedLinear(nn.Module):
                 acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
                 out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
                 out = out.reshape(*x.shape[:-1], self.out_features)
+                if out.dtype != orig_dtype:
+                    out = out.to(orig_dtype)
                 if self.bias is not None:
                     out = out + self.bias
                 return out
         w = self.weight_int8.float() * self.scale_w.view(1, -1)
         out = x @ w
+        if out.dtype != orig_dtype:
+            out = out.to(orig_dtype)
         if self.bias is not None:
             out = out + self.bias
         return out
