@@ -97,7 +97,7 @@ class LemaTrainer:
                 next_slot = (i + 1) % 2
 
                 flat_vram = self.memory.get_vram_flat_buffer(
-                    slot, allow_quantized=(self.lora_manager is None and self.full_ft_manager is None))
+                    slot, allow_quantized=(self.lora_manager is None and self.memory._use_native_w8a8()))
 
                 if i + 1 < len(self.layers):
                     self.memory.wait_prefetch(next_slot)
@@ -137,7 +137,7 @@ class LemaTrainer:
             prev_slot = (i - 1) % 2
 
             flat_vram = self.memory.get_vram_flat_buffer(
-                slot, allow_quantized=(self.lora_manager is None and self.full_ft_manager is None))
+                slot, allow_quantized=(self.lora_manager is None and self.full_ft_manager is None and self.memory._use_native_w8a8()))
             layer_module = self.adapter.construct_layer_module(self.layers[i]['id'], flat_vram, self.lora_manager, self.full_ft_manager)
 
             if i - 1 >= 0:

@@ -395,7 +395,7 @@ class _TransferEngine:
             parts.append(out.view(-1))
             off += qn
             s_off += shape[0] if len(shape) == 2 else 1
-        return torch.cat(parts)
+        return torch.cat(parts).to(self.dtype)
 
     def clear_vram_slot(self, vram_slot: int):
         self.vram_flat_buffers[vram_slot] = torch.empty(

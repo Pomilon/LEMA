@@ -7,6 +7,28 @@ from . import _w8a8
 from ._quant import quantize_tensor
 
 
+class _W8A8LinearFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight_int8, scale_w):
+        ctx.save_for_backward(weight_int8, scale_w)
+        ctx.x_shape = x.shape
+        q, scale_a = _w8a8.quantize_act(x)
+        ctx.scale_a = scale_a
+        acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), weight_int8)
+        out = _w8a8.apply_scale(acc, scale_w, scale_a)
+        out = out.reshape(*x.shape[:-1], scale_w.shape[0])
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        weight_int8, scale_w = ctx.saved_tensors
+        w_fp = weight_int8.float() * scale_w.view(1, -1)
+        grad_out_2d = grad_out.reshape(-1, grad_out.shape[-1])
+        grad_x_2d = grad_out_2d @ w_fp.t()
+        grad_x = grad_x_2d.reshape(ctx.x_shape)
+        return grad_x, None, None
+
+
 class QuantizedLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, bias: bool = False):
         super().__init__()
@@ -32,14 +54,28 @@ class QuantizedLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(self.weight_int8.device)
-        if _w8a8.HAS_NATIVE and x.device.type in ("cpu", "cuda") and not torch.is_grad_enabled():
-            q, scale_a = _w8a8.quantize_act(x)
-            acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
-            out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
-            out = out.reshape(*x.shape[:-1], self.out_features)
-            if self.bias is not None:
-                out = out + self.bias
-            return out
+        if _w8a8.HAS_NATIVE and x.device.type in ("cpu", "cuda"):
+            if torch.is_grad_enabled() and x.requires_grad:
+                out = _W8A8LinearFn.apply(x, self.weight_int8, self.scale_w)
+                if self.bias is not None:
+                    out = out + self.bias
+                return out
+            if torch.is_grad_enabled() and not x.requires_grad:
+                q, scale_a = _w8a8.quantize_act(x)
+                acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
+                out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
+                out = out.reshape(*x.shape[:-1], self.out_features)
+                if self.bias is not None:
+                    out = out + self.bias
+                return out
+            if not torch.is_grad_enabled():
+                q, scale_a = _w8a8.quantize_act(x)
+                acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
+                out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
+                out = out.reshape(*x.shape[:-1], self.out_features)
+                if self.bias is not None:
+                    out = out + self.bias
+                return out
         w = self.weight_int8.float() * self.scale_w.view(1, -1)
         out = x @ w
         if self.bias is not None:
