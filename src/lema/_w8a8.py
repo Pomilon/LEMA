@@ -91,17 +91,30 @@ def apply_scale(acc: torch.Tensor, scale_w: torch.Tensor, scale_a: torch.Tensor)
 
 
 def _native_int8_gemm_scaled_cuda(a: torch.Tensor, b: torch.Tensor, scale_w: torch.Tensor, scale_a: torch.Tensor) -> torch.Tensor:
+    a_i = a.contiguous().to(torch.int8)
+    b_i = b.contiguous().to(torch.int8)
+    M, K = a_i.shape
+    Kb, N = b_i.shape
+    assert K == Kb, f"K mismatch {K} vs {Kb}"
+    try:
+        if hasattr(torch, "_int_mm"):
+            acc = torch._int_mm(a_i, b_i)
+            return acc.float() * scale_w.float().view(1, -1) * float(scale_a)
+    except Exception:
+        pass
+    try:
+        import torchao.kernel.intmm as _intmm
+
+        acc = _intmm.safe_int_mm(a_i, b_i)
+        return acc.float() * scale_w.float().view(1, -1) * float(scale_a)
+    except Exception:
+        pass
     try:
         from lema._csrc import _lema_cpp
     except Exception as e:
         raise RuntimeError("CUDA scaled GEMM not available") from e
-    a = a.contiguous().to(torch.int8)
-    b = b.contiguous().to(torch.int8)
-    M, K = a.shape
-    Kb, N = b.shape
-    assert K == Kb, f"K mismatch {K} vs {Kb}"
-    out = torch.empty(M, N, dtype=torch.float32, device=a.device)
-    _lema_cpp.int8_gemm_scaled_cuda(a, b, M, K, N, scale_w.float().contiguous(), float(scale_a), out)
+    out = torch.empty(M, N, dtype=torch.float32, device=a_i.device)
+    _lema_cpp.int8_gemm_scaled_cuda(a_i, b_i, M, K, N, scale_w.float().contiguous(), float(scale_a), out)
     return out
 
 
