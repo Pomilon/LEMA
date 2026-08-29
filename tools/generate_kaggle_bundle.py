@@ -43,6 +43,7 @@ def main():
     lib_files = (
         glob.glob("src/lema/**/*.py", recursive=True) +
         glob.glob("src/lema/**/*.cpp", recursive=True) +
+        glob.glob("src/lema/**/*.cu", recursive=True) +
         glob.glob("src/lema/**/*.h", recursive=True)
     )
     for file_path in lib_files:
