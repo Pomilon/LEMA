@@ -408,7 +408,7 @@ class _QuantizedLlamaAttention(nn.Module):
         attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scaling
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
-        attn_weights = torch.softmax(attn_weights.float(), dim=-1).to(attn_weights.dtype)
+        attn_weights = torch.softmax(attn_weights.float(), dim=-1).to(v.dtype)
         if self.attention_dropout > 0 and self.training:
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout)
         attn_output = torch.matmul(attn_weights, v)
