@@ -206,6 +206,10 @@ extern "C" void int8_gemm_cuda(const int8_t* a, const int8_t* b,
                                int32_t* out, cudaStream_t stream);
 extern "C" void quantize_act_cuda(const float* x, int64_t n,
                                   int8_t* q, float* scale, cudaStream_t stream);
+extern "C" void int8_gemm_scaled_cuda(const int8_t* a, const int8_t* b,
+                                      int64_t M, int64_t K, int64_t N,
+                                      const float* scale_w, float scale_a,
+                                      float* out, cudaStream_t stream);
 
 // --- Pybind11 Module ---
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -232,11 +236,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        at::cuda::getCurrentCUDAStream());
     });
     m.def("quantize_act_cuda", [](torch::Tensor x, int64_t n,
-                                  torch::Tensor q, torch::Tensor scale) {
+                                   torch::Tensor q, torch::Tensor scale) {
         at::cuda::CUDAGuard guard(x.device());
         quantize_act_cuda(reinterpret_cast<const float*>(x.data_ptr()), n,
                           reinterpret_cast<int8_t*>(q.data_ptr()),
                           reinterpret_cast<float*>(scale.data_ptr()),
                           at::cuda::getCurrentCUDAStream());
+    });
+    m.def("int8_gemm_scaled_cuda", [](torch::Tensor a, torch::Tensor b, int64_t M,
+                                      int64_t K, int64_t N, torch::Tensor scale_w,
+                                      float scale_a, torch::Tensor out) {
+        at::cuda::CUDAGuard guard(a.device());
+        int8_gemm_scaled_cuda(reinterpret_cast<const int8_t*>(a.data_ptr()),
+                              reinterpret_cast<const int8_t*>(b.data_ptr()),
+                              M, K, N,
+                              reinterpret_cast<const float*>(scale_w.data_ptr()),
+                              scale_a,
+                              reinterpret_cast<float*>(out.data_ptr()),
+                              at::cuda::getCurrentCUDAStream());
     });
 }

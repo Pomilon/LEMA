@@ -88,3 +88,34 @@ def apply_scale(acc: torch.Tensor, scale_w: torch.Tensor, scale_a: torch.Tensor)
         return out
     _cpp.dequant_scale_gemm_avx2(acc, M, N, scale_w.float().contiguous(), float(scale_a), out)
     return out
+
+
+def _native_int8_gemm_scaled_cuda(a: torch.Tensor, b: torch.Tensor, scale_w: torch.Tensor, scale_a: torch.Tensor) -> torch.Tensor:
+    try:
+        from lema._csrc import _lema_cpp
+    except Exception as e:
+        raise RuntimeError("CUDA scaled GEMM not available") from e
+    a = a.contiguous().to(torch.int8)
+    b = b.contiguous().to(torch.int8)
+    M, K = a.shape
+    Kb, N = b.shape
+    assert K == Kb, f"K mismatch {K} vs {Kb}"
+    out = torch.empty(M, N, dtype=torch.float32, device=a.device)
+    _lema_cpp.int8_gemm_scaled_cuda(a, b, M, K, N, scale_w.float().contiguous(), float(scale_a), out)
+    return out
+
+
+def native_int8_gemm_scaled(a: torch.Tensor, b: torch.Tensor, scale_w: torch.Tensor, scale_a: torch.Tensor) -> torch.Tensor:
+    if a.is_cuda:
+        if HAS_NATIVE:
+            try:
+                return _native_int8_gemm_scaled_cuda(a, b, scale_w, scale_a)
+            except Exception:
+                pass
+        acc = _native_int8_gemm_cuda(a, b) if HAS_NATIVE else _native_int8_gemm_fallback(a, b)
+        return apply_scale(acc, scale_w, scale_a)
+    if not HAS_NATIVE:
+        acc = _native_int8_gemm_fallback(a, b)
+        return apply_scale(acc, scale_w, scale_a)
+    acc = _native_int8_gemm_cpu(a, b)
+    return apply_scale(acc, scale_w, scale_a)

@@ -78,6 +78,41 @@ extern "C" void int8_gemm_cuda(const int8_t* a, const int8_t* b,
     }
 }
 
+__global__ void int8_gemm_scaled_kernel(const int8_t* a, const int8_t* b,
+                                        int64_t M, int64_t K, int64_t N,
+                                        const float* scale_w, float scale_a,
+                                        float* out) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * N) return;
+    int64_t i = idx / N;
+    int64_t j = idx % N;
+    const int8_t* ai = a + i * K;
+    const int8_t* bj = b + j;
+    int32_t acc = 0;
+    int64_t k = 0;
+    for (; k + 4 <= K; k += 4) {
+        int32_t av, bv;
+        std::memcpy(&av, ai + k, sizeof(av));
+        std::memcpy(&bv, bj + k * N, sizeof(bv));
+        acc += __dp4a(av, bv, 0);
+    }
+    for (; k < K; k++) acc += (int32_t)ai[k] * (int32_t)bj[k * N];
+    out[idx] = (float)acc * scale_a * scale_w[j];
+}
+
+extern "C" void int8_gemm_scaled_cuda(const int8_t* a, const int8_t* b,
+                                      int64_t M, int64_t K, int64_t N,
+                                      const float* scale_w, float scale_a,
+                                      float* out, cudaStream_t stream) {
+    int64_t total = M * N;
+    const int threads = 256;
+    int64_t blocks = (total + threads - 1) / threads;
+    int8_gemm_scaled_kernel<<<(unsigned)blocks, threads, 0, stream>>>(
+        a, b, M, K, N, scale_w, scale_a, out);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+}
+
 extern "C" void quantize_act_cuda(const float* x, int64_t n,
                                   int8_t* q, float* scale, cudaStream_t stream) {
     quantize_act_kernel<<<1, kQuantThreads, 0, stream>>>(x, n, q, scale);

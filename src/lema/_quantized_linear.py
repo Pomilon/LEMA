@@ -15,8 +15,12 @@ class _W8A8LinearFn(torch.autograd.Function):
         ctx.orig_dtype = x.dtype
         q, scale_a = _w8a8.quantize_act(x)
         ctx.scale_a = scale_a
-        acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), weight_int8)
-        out = _w8a8.apply_scale(acc, scale_w, scale_a)
+        q2 = q.reshape(-1, q.shape[-1])
+        if q2.is_cuda and _w8a8.HAS_NATIVE:
+            out = _w8a8.native_int8_gemm_scaled(q2, weight_int8, scale_w, scale_a)
+        else:
+            acc = _w8a8.native_int8_gemm(q2, weight_int8)
+            out = _w8a8.apply_scale(acc, scale_w, scale_a)
         out = out.reshape(*x.shape[:-1], scale_w.shape[0])
         if out.dtype != ctx.orig_dtype:
             out = out.to(ctx.orig_dtype)
@@ -72,8 +76,12 @@ class QuantizedLinear(nn.Module):
                 return out
             if torch.is_grad_enabled() and not x.requires_grad:
                 q, scale_a = _w8a8.quantize_act(x)
-                acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
-                out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
+                q2 = q.reshape(-1, q.shape[-1])
+                if q2.is_cuda and _w8a8.HAS_NATIVE:
+                    out = _w8a8.native_int8_gemm_scaled(q2, self.weight_int8, self.scale_w, scale_a)
+                else:
+                    acc = _w8a8.native_int8_gemm(q2, self.weight_int8)
+                    out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
                 out = out.reshape(*x.shape[:-1], self.out_features)
                 if out.dtype != orig_dtype:
                     out = out.to(orig_dtype)
@@ -82,8 +90,12 @@ class QuantizedLinear(nn.Module):
                 return out
             if not torch.is_grad_enabled():
                 q, scale_a = _w8a8.quantize_act(x)
-                acc = _w8a8.native_int8_gemm(q.reshape(-1, q.shape[-1]), self.weight_int8)
-                out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
+                q2 = q.reshape(-1, q.shape[-1])
+                if q2.is_cuda and _w8a8.HAS_NATIVE:
+                    out = _w8a8.native_int8_gemm_scaled(q2, self.weight_int8, self.scale_w, scale_a)
+                else:
+                    acc = _w8a8.native_int8_gemm(q2, self.weight_int8)
+                    out = _w8a8.apply_scale(acc, self.scale_w, scale_a)
                 out = out.reshape(*x.shape[:-1], self.out_features)
                 if out.dtype != orig_dtype:
                     out = out.to(orig_dtype)
