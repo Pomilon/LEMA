@@ -12,8 +12,13 @@ try:
             extra_compile_args={
                 'cxx': ['-O3', '-std=c++17'],
                 'nvcc': ['-O3', '-std=c++17',
+                         '-gencode=arch=compute_60,code=sm_60',
+                         '-gencode=arch=compute_60,code=compute_60',
+                         '-gencode=arch=compute_70,code=sm_70',
                          '-gencode=arch=compute_75,code=sm_75',
-                         '-gencode=arch=compute_80,code=sm_80'],
+                         '-gencode=arch=compute_75,code=compute_75',
+                         '-gencode=arch=compute_80,code=sm_80',
+                         '-gencode=arch=compute_80,code=compute_80'],
             },
         ),
     )
