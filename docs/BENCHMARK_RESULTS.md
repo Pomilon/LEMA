@@ -176,4 +176,34 @@ Full unit suite 137/137 passing (local + Kaggle), including the all-four-bits en
 
 CPU kernel benchmark (2048×4096×4096, 6-core/12-thread box, bit-exact vs fp32 reference): native AVX2 int8 GEMM 0.304 s vs torch fp32 matmul 0.367 s (0.83x — faster than fp32). Gated by `tests/test_w8a8_benchmark.py`.
 
-T4 end-to-end numbers (transfer time, step time, VRAM, RSS: fp16 vs W8A8 int8) are recorded by the notebook's W8A8 demo cell (`16c`) and will be tabulated from the next Kaggle validation run.
+T4 end-to-end (TinyLlama 1.1B, selective full-FT last:2 q/k/v/o, 2 steps, Kaggle T4 — `HAS_NATIVE True`, `USE_CUDA True`, kernel v11 COMPLETE):
+
+**Transfer (RAM→VRAM, one layer = 22.0M params, 88.1 MB fp16):**
+
+| Precision | Buffer | Time | Throughput |
+|---|---|---|---|
+| fp16 | 88.1 MB | 12.30 ms | 7.2 GB/s |
+| int8 (W8A8) | 44.0 MB | 14.06 ms | 3.1 GB/s |
+
+Transfer bytes halve (2.0× reduction, 88.1→44.0 MB) — storage/PCIe saving is real. RAM→VRAM wall time does not improve (Python quantize + fused scale overhead > PCIe saving on this shape).
+
+**Training step (TinyLlama 1.1B, selective full-FT last:2, seq=64, same selection):**
+
+| Metric | fp16 baseline | int8-all (dequant slot) | int8-W8A8 (native int8×int8) |
+|---|---|---|---|
+| Loss | 13.44 → 12.25 | 13.00 → 12.13 | 12.81 → 11.81 → 12.69 → 11.69* |
+| Step 1 / Step 2 | 2497 ms / 945 ms | 18562 ms / 16048 ms | 2346 ms / 862 ms → 18041 ms / 15481 ms |
+| Speedup (step2) | — | 0.06× | 0.06× |
+| Peak VRAM | 0.76 GB | 1.23 GB | 1.23 GB |
+| Peak RSS | 4.89 GB | 5.30 GB | 5.11 GB (vs 5.23 GB fp16 baseline) |
+
+*W8A8 baseline is fresh run with same seed (12.81→11.81), W8A8 step is 12.69→11.69; both baselines show same ~0.76 GB VRAM.
+
+**Honest findings:**
+
+- **Storage/PCIe win is real:** W8A8 halves weight bytes across disk, RAM, PCIe, and VRAM buffer simultaneously (44.0 vs 88.1 MB, 2.0×). C++ pack is 45% faster (1.15→0.63 ms) and end-to-end train step is 4.4% faster *in the pure C++ vs Python benchmark* — but not in the quantized training loop.
+- **Step time is dominated by quantized compute, not transfer:** per-step GEMM quantize/apply_scale + adapter reconstruction dominates (int8 GEMM is fast in isolation — 0.304 vs 0.367 s — but the per-layer quantized forward rebuilds + scales per step outweigh the saving on TinyLlama). Measured W8A8 step2 is ~18× slower than fp16 (862→15481 ms) on the T4 with `HAS_NATIVE True`.
+- **VRAM does not drop yet:** weight VRAM buffer halves (44 vs 88 MB) but quantized forward adds scale bookkeeping, and the full-FT path also holds dequant/full-precision structures; net peak VRAM rises 0.76→1.23 GB (+473 MB) on this selection. RSS is roughly flat.
+- **Correctness is sound:** loss advances every step, transfer byte reduction asserted, W8A8 forward bit-exact vs fp32 reference in unit tests (6 tests in `tests/test_w8a8_other_adapters.py`, 162 passed + 1 skipped full suite local and Kaggle).
+
+Follow-up perf work (stream-overlapped dequant, fused pack+quant, kernel autotuning) is required for W8A8 to be faster wall-clock on real models — tracked separately. The current gate is correctness + honest measurement, not speedup.
