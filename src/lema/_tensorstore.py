@@ -67,7 +67,7 @@ class _TransferEngine:
             sample_key = self.gbi.get_keys()[0]
             try:
                 sample_tensor = self.gbi.load_tensors([sample_key])[sample_key]
-                if sample_tensor.dtype != self.dtype:
+                if sample_tensor.dtype not in (torch.int8, torch.uint8) and sample_tensor.dtype != self.dtype:
                      logger.info(f"LEMA: Auto-detected model dtype {sample_tensor.dtype}. Adjusting buffers.")
                      self.dtype = sample_tensor.dtype
             except: pass
@@ -234,7 +234,24 @@ class _TransferEngine:
         if self.quant_bits:
             from ._quant_backend import quantize_tensor_with_backend
             weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
-            quant_weights = {n: quantize_tensor_with_backend(w, self.quant_bits, backend=getattr(self.config, "quant_backend", "custom")) for n, w in weights.items()}
+            is_pre = False
+            try:
+                first = param_names[0] if param_names else None
+                if first is not None and f"{first}.scale" in self.gbi.param_map:
+                    s = weights[first]
+                    if s.dtype == torch.int8 or s.dtype == torch.uint8:
+                        is_pre = True
+            except Exception:
+                is_pre = False
+            if is_pre:
+                quant_weights = {}
+                for n in param_names:
+                    q = weights[n]
+                    sname = f"{n}.scale"
+                    sc = self.gbi.param_map[sname].get_tensor(sname) if sname in self.gbi.param_map else torch.ones(1, dtype=torch.float32)
+                    quant_weights[n] = (q, sc)
+            else:
+                quant_weights = {n: quantize_tensor_with_backend(w, self.quant_bits, backend=getattr(self.config, "quant_backend", "custom")) for n, w in weights.items()}
         else:
             weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
             quant_weights = None
