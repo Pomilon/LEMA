@@ -158,8 +158,21 @@ config = LemaConfig(
     opt_state_bits=8,      # int8 Adam moments in full-FT
     grad_acc_bits=8,       # int8 gradient accumulators
     kv_bits=8,             # int8 KV cache chunks
+    quant_backend="auto",  # auto | custom | torchao | quanto | bitsandbytes
 )
 ```
+
+**Backends (optional installs — pull only what you need):**
+
+| Backend | Install | Hardware | Notes |
+|---|---|---|---|
+| `custom` | built-in | CPU + CUDA | hand-rolled W8A8 (AVX2 / DP4A) — default fallback |
+| `torchao` | `pip install lema[torchao]` | CPU + CUDA + MPS + XPU | PyTorch-native, recommended |
+| `quanto` | `pip install lema[quanto]` | CPU + CUDA + MPS | `optimum-quanto`, lightweight |
+| `bitsandbytes` | `pip install lema[bitsandbytes]` | CUDA only | `LLM.int8` / NF4 |
+| `auto` | `pip install lema[quant]` → torchao+quanto | auto-detect | picks first available (`torchao` > `quanto` > `bitsandbytes` > `custom`) |
+
+`pip install lema[all-quant]` pulls all three; `pip install lema` alone keeps the `custom` fallback with no extra deps.
 
 With native W8A8 kernels present (built automatically: AVX2 on CPU, DP4A on CUDA), `weights_bits=8` goes further than storage savings — llama decoder layers are served as **raw int8 buffers and consumed directly by int8×int8→int32 GEMM kernels** with fused scale epilogues. No fp32 dequant slot is produced on the hot path, so the streamed weight footprint halves on disk, RAM, PCIe, *and* VRAM simultaneously. Full-FT optimizer states and accumulators stay quantized in RAM (including the mmap disk backend) and are dequantized only inside the per-layer AdamW step. The KV cache stores int8 values with a dynamic per-chunk scale.
 

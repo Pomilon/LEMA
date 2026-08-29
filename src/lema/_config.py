@@ -62,6 +62,7 @@ class LemaConfig:
     opt_state_bits: int | None = None
     grad_acc_bits: int | None = None
     kv_bits: int | None = None
+    quant_backend: str = "auto"
 
     def __post_init__(self):
         if self.gbi_path is None:
@@ -77,6 +78,7 @@ class LemaConfig:
             self.state_strategy = StateStrategy(self.state_strategy.lower())
         self._validate_full_ft()
         self._validate_quant()
+        self._validate_quant_backend()
         if not 1 <= self.prefetch_distance <= 3:
             raise ValueError(
                 f"Invalid prefetch_distance: {self.prefetch_distance!r}. "
@@ -94,6 +96,13 @@ class LemaConfig:
                 raise ValueError(
                     f"Invalid {field}: {val!r}. Allowed: {[a for a in allowed if a is not None]}"
                 )
+
+    def _validate_quant_backend(self):
+        allowed = ("auto", "custom", "torchao", "quanto", "bitsandbytes")
+        if self.quant_backend not in allowed:
+            raise ValueError(
+                f"Invalid quant_backend: {self.quant_backend!r}. Allowed: {list(allowed)}"
+            )
 
     def _validate_full_ft(self):
         if self.grad_accum_backend not in ("auto", "ram", "disk"):

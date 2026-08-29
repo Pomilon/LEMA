@@ -34,6 +34,13 @@ dependencies = [
     "peft>=0.4.0",
 ]
 
+[project.optional-dependencies]
+torchao = ["torchao>=0.9.0"]
+quanto = ["optimum-quanto>=0.2.0"]
+bitsandbytes = ["bitsandbytes>=0.43.0"]
+quant = ["torchao>=0.9.0", "optimum-quanto>=0.2.0"]
+all-quant = ["torchao>=0.9.0", "optimum-quanto>=0.2.0", "bitsandbytes>=0.43.0"]
+
 [project.urls]
 "Homepage" = "https://github.com/pomilon/LEMA"
 "Bug Tracker" = "https://github.com/pomilon/LEMA/issues"
