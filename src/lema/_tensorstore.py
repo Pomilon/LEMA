@@ -64,19 +64,33 @@ class _TransferEngine:
         # 1. Precision Detection
         self.dtype = getattr(torch, self.config.dtype) if isinstance(self.config.dtype, str) else self.config.dtype
         if self.gbi.get_keys():
-            sample_key = self.gbi.get_keys()[0]
+            # Sample the first float tensor that is not a quantization scale
+            # sibling. Pre-quantized checkpoints lead with int8/uint8 weight
+            # tensors, so a naive first-key sample would skip adjustment and
+            # leave the engine at the config default while modules are built
+            # from the real model dtype (dtype mismatch at layer boundaries).
             try:
-                sample_tensor = self.gbi.load_tensors([sample_key])[sample_key]
-                if sample_tensor.dtype not in (torch.int8, torch.uint8) and sample_tensor.dtype != self.dtype:
-                     logger.info(f"LEMA: Auto-detected model dtype {sample_tensor.dtype}. Adjusting buffers.")
-                     self.dtype = sample_tensor.dtype
+                for key in self.gbi.get_keys():
+                    if key.endswith(".scale") or key.endswith(".scale_absmax"):
+                        continue
+                    t = self.gbi.load_tensors([key])[key]
+                    if t.dtype in (torch.int8, torch.uint8):
+                        continue
+                    if t.dtype != self.dtype:
+                        logger.info(f"LEMA: Auto-detected model dtype {t.dtype}. Adjusting buffers.")
+                        self.dtype = t.dtype
+                    break
             except: pass
 
         self.quant_bits = self.config.weights_bits if self.config.weights_bits else None
         self.ram_scales: dict[int, torch.Tensor] = {}
+        self._scale_device_cache: dict[int, torch.Tensor] = {}
+        self._ram_packed_bytes: dict[int, int] = {}
         self.adapter.transfer_engine = self
 
-        self.itemsize = torch.tensor([], dtype=self.dtype).element_size()
+        # Buffer dtypes: quantized streaming packs raw bytes (1 B/elem) through
+        # RAM staging into the VRAM slot; unquantized stays in model precision.
+        self.itemsize = torch.empty(0, dtype=self._vram_buffer_dtype()).element_size()
         self.max_params = self._calculate_max_params()
 
         # 2. Dynamic Resource Detection
@@ -94,6 +108,7 @@ class _TransferEngine:
             torch.cuda.set_per_process_memory_fraction(self.config.vram_fraction)
 
         # 3. Pre-allocated VRAM slots (Double buffering)
+        # slot_size_gb reflects the true per-slot footprint (int8 for native W8A8)
         slot_size_gb = (self.max_params * self.itemsize) / (1024**3)
         if 2 * slot_size_gb > self.config.max_vram_gb:
             logger.warning(f"LEMA: VRAM slots ({2 * slot_size_gb:.2f} GB) exceed budget ({self.config.max_vram_gb:.2f} GB)")
@@ -131,6 +146,8 @@ class _TransferEngine:
             self.cpp_mgr = _lema_cpp.LemaMemoryManager(len(self.layers_meta) + 2, self.max_params)
             for i, buf in enumerate(self.vram_flat_buffers):
                 self.cpp_mgr.register_vram_slot(i, buf)
+            # Stale binaries lack the num_bytes parameter (full-buffer fallback)
+            self._cpp_exact_bytes = "num_bytes" in (self.cpp_mgr.async_transfer_to_vram.__doc__ or "")
         else:
             self.cpp_mgr = None
             self.transfer_streams = [torch.cuda.Stream() for _ in range(2)] if self.is_cuda else None
@@ -156,7 +173,7 @@ class _TransferEngine:
         # STREAMING initialization
         logger.info(f"LEMA: Initializing STREAMING strategy (Precision: {self.dtype})...")
         for i in range(2):
-            buf = torch.empty(self.max_params, device="cpu", dtype=self.dtype)
+            buf = torch.empty(self.max_params, device="cpu", dtype=self._ram_staging_dtype())
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[1000 + i] = buf
@@ -193,12 +210,7 @@ class _TransferEngine:
         resident_count = 0
 
         for layer in self.layers_meta:
-            names = self.adapter.get_param_names_for_layer(layer['id'])
-            layer_params = 0
-            for name in names:
-                shape = self.adapter.get_tensor_shape(self.gbi, name)
-                if shape is not None:
-                    layer_params += torch.Size(shape).numel()
+            layer_params = self._layer_q_numel(layer['id'])
 
             layer_gb = (layer_params * self.itemsize) / (1024**3)
             if processed_gb + layer_gb <= self.config.max_ram_gb * 0.9:
@@ -213,7 +225,7 @@ class _TransferEngine:
 
         # Streaming slots for remaining layers
         for i in range(2):
-            buf = torch.empty(self.max_params, device="cpu", dtype=self.dtype)
+            buf = torch.empty(self.max_params, device="cpu", dtype=self._ram_staging_dtype())
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[1000 + i] = buf
@@ -222,43 +234,46 @@ class _TransferEngine:
         self.ram_layer_ids = [-1, -1]
 
     def _vram_buffer_dtype(self) -> torch.dtype:
-        return torch.int8 if self._use_native_w8a8() else self.dtype
+        if self.quant_bits:
+            return torch.int8 if self._use_native_w8a8() else torch.uint8
+        return self.dtype
+
+    def _ram_staging_dtype(self) -> torch.dtype:
+        """RAM staging holds raw quantized bytes (1 B/elem); fp otherwise."""
+        return torch.uint8 if self.quant_bits else self.dtype
 
     def _use_native_w8a8(self) -> bool:
         return (self.quant_bits == 8 and _w8a8.HAS_NATIVE
                 and getattr(self.adapter, "supports_quantized", False))
 
     def _pack_layer_to_ram(self, layer_id: int, slot: int = 0, is_resident: bool = False):
-        """Load a layer from disk and pack into a flat RAM buffer."""
+        """Load a layer from disk and pack raw values into a flat RAM buffer.
+
+        Quantized layers pack raw int8 / int4-packed bytes (1 B/elem) so the
+        RAM->VRAM transfer moves only the quantized payload; scales travel
+        separately via ram_scales."""
         param_names = self.adapter.get_param_names_for_layer(layer_id)
         if self.quant_bits:
             from ._quant_backend import quantize_tensor_with_backend
-            weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
-            is_pre = False
-            try:
-                first = param_names[0] if param_names else None
-                if first is not None and f"{first}.scale" in self.gbi.param_map:
-                    s = weights[first]
-                    if s.dtype == torch.int8 or s.dtype == torch.uint8:
-                        is_pre = True
-            except Exception:
-                is_pre = False
-            if is_pre:
-                quant_weights = {}
-                for n in param_names:
-                    q = weights[n]
-                    sname = f"{n}.scale"
-                    sc = self.gbi.param_map[sname].get_tensor(sname) if sname in self.gbi.param_map else torch.ones(1, dtype=torch.float32)
-                    quant_weights[n] = (q, sc)
-            else:
-                quant_weights = {n: quantize_tensor_with_backend(w, self.quant_bits, backend=getattr(self.config, "quant_backend", "custom")) for n, w in weights.items()}
+            packed: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+            for n in param_names:
+                t = self.adapter.load_tensor(self.gbi, n)
+                sname = f"{n}.scale"
+                if t.dtype in (torch.int8, torch.uint8) and sname in self.gbi.param_map:
+                    # Pre-quantized on disk: stream the raw bytes + stored scale
+                    sc = self.gbi.param_map[sname].get_tensor(sname)
+                    packed.append((t.contiguous().view(-1), sc.float().view(-1)))
+                else:
+                    q, sc = quantize_tensor_with_backend(
+                        t, self.quant_bits, backend=getattr(self.config, "quant_backend", "custom"))
+                    packed.append((q.contiguous().view(-1), sc.float().view(-1)))
         else:
-            weights = {n: self.adapter.load_tensor(self.gbi, n) for n in param_names}
-            quant_weights = None
+            packed = [(self.adapter.load_tensor(self.gbi, n).contiguous().view(-1), None)
+                      for n in param_names]
 
         if is_resident:
-            total_el = sum(w.numel() for w in weights.values())
-            buf = torch.empty(total_el, device="cpu", dtype=self.dtype)
+            total_el = sum(d.numel() for d, _ in packed)
+            buf = torch.empty(total_el, device="cpu", dtype=self._ram_staging_dtype())
             if self.is_cuda:
                 buf = buf.pin_memory()
             self.ram_buffers[layer_id] = buf
@@ -269,25 +284,26 @@ class _TransferEngine:
 
         offset = 0
         scale_parts = []
-        for name in param_names:
-            if quant_weights is not None:
-                q_int, scale = quant_weights[name]
-                numel = q_int.numel()
-                buf[offset : offset + numel].copy_(q_int.view(-1))
+        for data, scale in packed:
+            numel = data.numel()
+            dst_slice = buf[offset : offset + numel]
+            if dst_slice.dtype != data.dtype and dst_slice.element_size() == data.element_size():
+                # Same-width reinterpret (uint8 <-> int8): keeps it a raw byte copy
+                dst_slice = dst_slice.view(data.dtype)
+            dst_slice.copy_(data)
+            if scale is not None:
                 scale_parts.append(scale)
-            else:
-                w = weights[name]
-                numel = w.numel()
-                buf[offset : offset + numel].copy_(w.view(-1))
             offset += numel
+        self._ram_packed_bytes[layer_id if is_resident else 1000 + slot] = offset
 
-        if quant_weights is not None:
+        if self.quant_bits:
             if scale_parts:
                 self.ram_scales[layer_id] = torch.cat([s.view(-1) for s in scale_parts])
             else:
                 self.ram_scales[layer_id] = torch.tensor([], dtype=torch.float32)
+            self._scale_device_cache.pop(layer_id, None)
 
-        del weights, quant_weights
+        del packed
 
         if not is_resident:
             self.ram_layer_ids[slot] = layer_id
@@ -325,25 +341,42 @@ class _TransferEngine:
             del self._prefetch_futures[slot]
 
     def async_transfer_to_vram(self, layer_id: int, vram_slot: int, ram_slot: int | None = None):
-        """Stage 2: Async transfer from RAM to GPU VRAM."""
+        """Stage 2: Async transfer from RAM to GPU VRAM.
+
+        Moves only the packed payload bytes recorded by _pack_layer_to_ram
+        (the quantized layer size), never the full staging buffer."""
         is_resident = (layer_id in self.ram_buffers and layer_id < 1000)
+        buf_key = layer_id if is_resident else (1000 + (ram_slot or 0))
         self.vram_dequant.pop(vram_slot, None)
         self._vram_layer_ids[vram_slot] = layer_id
         self._vram_ram_slot[vram_slot] = -1 if is_resident else (ram_slot or 0)
 
         if self.use_cpp:
-            cpp_layer_id = layer_id if is_resident else (1000 + (ram_slot or 0))
-            event_id = self.cpp_mgr.async_transfer_to_vram(cpp_layer_id, vram_slot)
+            event_id = self.cpp_mgr.async_transfer_to_vram(
+                buf_key, vram_slot,
+                **({"num_bytes": self._ram_packed_bytes.get(buf_key, -1)}
+                   if self._cpp_exact_bytes else {}))
             self._transfer_event_ids[vram_slot] = event_id
         else:
-            ram_buf = self.ram_buffers[layer_id] if is_resident else self.ram_buffers[1000 + (ram_slot or 0)]
+            ram_buf = self.ram_buffers[buf_key]
             vram_buf = self.vram_flat_buffers[vram_slot]
+            n = self._ram_packed_bytes.get(buf_key)
+            if n is None:
+                n = min(ram_buf.numel(), vram_buf.numel())
+            src = ram_buf[:n]
+            if src.dtype != vram_buf.dtype and src.element_size() == vram_buf.element_size():
+                # Same-width reinterpret (uint8 <-> int8): raw byte copy, no cast
+                src = src.view(vram_buf.dtype)
 
             if self.is_cuda and self.transfer_streams:
                 with torch.cuda.stream(self.transfer_streams[vram_slot]):
-                    vram_buf[:ram_buf.numel()].copy_(ram_buf, non_blocking=True)
+                    vram_buf[:n].copy_(src, non_blocking=True)
             else:
-                vram_buf[:ram_buf.numel()].copy_(ram_buf)
+                vram_buf[:n].copy_(src)
+
+    def layer_transfer_bytes(self, layer_id: int) -> int:
+        """Exact byte count a RAM->VRAM transfer moves for this layer."""
+        return self._layer_q_numel(layer_id) * torch.empty(0, dtype=self._vram_buffer_dtype()).element_size()
 
     def get_vram_flat_buffer(self, vram_slot: int, allow_quantized: bool = True) -> torch.Tensor:
         """Stage 3: Wait for transfer to complete and return VRAM buffer."""
@@ -376,12 +409,20 @@ class _TransferEngine:
         return self.vram_dequant[vram_slot]
 
     def get_layer_scale(self, layer_id: int, slot: int) -> torch.Tensor | None:
+        """Per-row/tensor scales for a layer (slot kept for API compatibility).
+
+        The device copy is cached; _pack_layer_to_ram invalidates it."""
         if not self.quant_bits:
             return None
+        cached = self._scale_device_cache.get(layer_id)
+        if cached is not None:
+            return cached
         scale = self.ram_scales.get(layer_id)
         if scale is None:
             return None
-        return scale.to(self.device)
+        dev = scale.to(self.device)
+        self._scale_device_cache[layer_id] = dev
+        return dev
 
     def _layer_q_numel(self, layer_id: int) -> int:
         total = 0

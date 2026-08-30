@@ -24,6 +24,7 @@ def quantize_checkpoint(model_path: str, output_dir: str, backend: str = "custom
 
     tensors = {}
     scales = {}
+    logical_shapes = {}
     for f in files:
         with safe_open(f, framework="pt", device="cpu") as handle:
             for key in handle.keys():
@@ -41,12 +42,16 @@ def quantize_checkpoint(model_path: str, output_dir: str, backend: str = "custom
                 if bits == 4:
                     from lema._quant import pack_int4
                     q = pack_int4(q)
+                    logical_shapes[key] = list(t.shape)
                 tensors[key] = q.contiguous()
                 scales[f"{key}.scale"] = scale.contiguous().float()
 
     out_path = os.path.join(output_dir, "model.safetensors")
     combined = {**tensors, **scales}
-    save_file(combined, out_path)
+    # int4-packed tensors change storage shape; record logical shapes so the
+    # engine resolves true per-param geometry (see GlobalBinaryIndex).
+    meta = {"lema_logical_shapes": json.dumps(logical_shapes)} if logical_shapes else None
+    save_file(combined, out_path, metadata=meta)
     print(f"Quantized {len(tensors)} tensors ({bits}-bit via {backend}) -> {out_path} ({sum(v.numel()*v.element_size() for v in combined.values())/1e6:.1f} MB, scales {len(scales)})")
     # copy config if exists
     for name in ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"]:

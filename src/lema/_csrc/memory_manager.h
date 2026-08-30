@@ -35,7 +35,7 @@ public:
     void pack_layer_to_ram(int64_t layer_id, const std::vector<torch::Tensor>& src_tensors);
 
     // Async VRAM transfer with CUDA event tracking
-    int64_t async_transfer_to_vram(int64_t layer_id, int64_t vram_slot);
+    int64_t async_transfer_to_vram(int64_t layer_id, int64_t vram_slot, int64_t num_bytes = -1);
     void wait_vram_transfer(int64_t event_id);
     bool is_transfer_complete(int64_t event_id);
     void synchronize_all();

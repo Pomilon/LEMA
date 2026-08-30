@@ -95,8 +95,15 @@ class LemaModel:
         model_dtype = torch.float32
         if self.gbi.get_keys():
             try:
-                sample = self.gbi.load_tensors([self.gbi.get_keys()[0]])
-                model_dtype = next(iter(sample.values())).dtype
+                for key in self.gbi.get_keys():
+                    if key.endswith(".scale") or key.endswith(".scale_absmax"):
+                        continue
+                    sample = self.gbi.load_tensors([key])
+                    t = sample[key]
+                    if t.dtype in (torch.int8, torch.uint8):
+                        continue
+                    model_dtype = t.dtype
+                    break
             except: pass
 
         # 5. Initialize LoRA Manager (full-FT manager is built after the store

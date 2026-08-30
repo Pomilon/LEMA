@@ -1,4 +1,5 @@
 #include "memory_manager.h"
+#include <algorithm>
 #include <cstring>
 #include <cstdint>
 #include <iostream>
@@ -92,7 +93,7 @@ void LemaMemoryManager::pack_layer_to_ram(int64_t layer_id, const std::vector<to
     }
 }
 
-int64_t LemaMemoryManager::async_transfer_to_vram(int64_t layer_id, int64_t vram_slot) {
+int64_t LemaMemoryManager::async_transfer_to_vram(int64_t layer_id, int64_t vram_slot, int64_t num_bytes) {
     auto ram_it = ram_buffers_.find(layer_id);
     if (ram_it == ram_buffers_.end()) {
         throw std::runtime_error(std::string("Source RAM buffer not registered for layer ") + std::to_string(layer_id));
@@ -112,8 +113,14 @@ int64_t LemaMemoryManager::async_transfer_to_vram(int64_t layer_id, int64_t vram
     at::cuda::CUDAGuard guard(transfer_stream_.device());
 
     // Launch async copy on the transfer stream (non-blocking w.r.t. default stream)
+    // num_bytes < 0 copies the whole source; otherwise copy exactly num_bytes
+    // (quantized payload), clamped to what src and dst can hold.
     at::cuda::CUDAStreamGuard stream_guard(transfer_stream_);
-    dst.slice(0, 0, src.numel()).copy_(src, true);
+    int64_t n = src.numel();
+    if (num_bytes >= 0) {
+        n = std::min<int64_t>(num_bytes, std::min<int64_t>(src.numel(), dst.numel()));
+    }
+    dst.slice(0, 0, n).copy_(src.slice(0, 0, n), true);
 
     // Record completion event on the transfer stream
     cudaEventRecord(event, transfer_stream_);
@@ -218,7 +225,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("register_ram_buffer", &lema::LemaMemoryManager::register_ram_buffer)
         .def("register_vram_slot", &lema::LemaMemoryManager::register_vram_slot)
         .def("pack_layer_to_ram", &lema::LemaMemoryManager::pack_layer_to_ram)
-        .def("async_transfer_to_vram", &lema::LemaMemoryManager::async_transfer_to_vram)
+        .def("async_transfer_to_vram", &lema::LemaMemoryManager::async_transfer_to_vram,
+             py::arg("layer_id"), py::arg("vram_slot"), py::arg("num_bytes") = -1)
         .def("wait_vram_transfer", &lema::LemaMemoryManager::wait_vram_transfer)
         .def("is_transfer_complete", &lema::LemaMemoryManager::is_transfer_complete)
         .def("submit_prefetch_job", &lema::LemaMemoryManager::submit_prefetch_job)

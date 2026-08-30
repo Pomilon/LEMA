@@ -2,8 +2,16 @@ import importlib.util
 
 import torch
 
+from ._utils._logger import logger
+
 
 _BACKENDS = ("custom", "torchao", "quanto", "bitsandbytes")
+
+# Engine contract for streamed weights (dequantize_with_backend is custom-format):
+#   bits=8 -> (int8 q, per-row fp32 scale)
+#   bits=4 -> custom pack_int4 uint8 (half numel) + scale
+# Backends that cannot honor this contract must fall back to custom LOUDLY.
+_WARNED: set[tuple[str, int, str]] = set()
 
 
 def is_backend_available(backend: str) -> bool:
@@ -47,9 +55,26 @@ def resolve_backend(requested: str | None) -> str:
             f"Install it with: pip install lema[{requested}]  "
             f"(or pip install lema[all-quant] for all backends)"
         )
-    if requested == "bitsandbytes":
-        pass
     return requested
+
+
+def _warn_once(key: tuple[str, int, str], msg: str) -> None:
+    if key not in _WARNED:
+        _WARNED.add(key)
+        logger.warning(f"LEMA: {msg}")
+
+
+def _fallback_custom(
+    t: torch.Tensor, bits: int, group_size: int, backend: str, reason: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _warn_once(
+        (backend, bits, "fallback"),
+        f"quant backend '{backend}' cannot serve bits={bits} ({reason}); "
+        f"falling back to the custom quantizer.",
+    )
+    from ._quant import quantize_tensor as _custom_q
+
+    return _custom_q(t, bits, group_size=group_size)
 
 
 def quantize_tensor_with_backend(
@@ -61,92 +86,70 @@ def quantize_tensor_with_backend(
 
         return _custom_q(t, bits, group_size=group_size)
     if name == "torchao":
+        if bits != 8:
+            return _fallback_custom(t, bits, group_size, name, "only 8-bit is engine-compatible")
         try:
             import torch as _torch
 
             _t = t.detach().float()
-            if bits == 8:
-                from torchao.quantization.utils import choose_qparams_affine, quantize_affine
-                from torchao.quantization.quant_primitives import MappingType
+            from torchao.quantization.utils import choose_qparams_affine, quantize_affine
+            from torchao.quantization.quant_primitives import MappingType
 
-                if _t.ndim == 1:
-                    block_size = (_t.shape[0],)
-                elif _t.ndim == 2:
-                    block_size = (1, _t.shape[1])
-                else:
-                    block_size = tuple([1] * (_t.ndim - 1) + [_t.shape[-1]])
-                scale, zp = choose_qparams_affine(
-                    _t, MappingType.SYMMETRIC, block_size, _torch.int8, eps=1e-6
-                )
-                q = quantize_affine(_t, block_size, scale, zp, _torch.int8)
-                if q.ndim == 2 and scale.ndim == 1:
-                    scale = scale.view(-1, 1)
-                return q.to(_torch.int8), scale.to(_torch.float32)
-            if bits == 4:
-                from ._quant import quantize_tensor as _custom_q
-
-                return _custom_q(t, bits, group_size=group_size)
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
-        except Exception:
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
+            if _t.ndim == 1:
+                block_size = (_t.shape[0],)
+            elif _t.ndim == 2:
+                block_size = (1, _t.shape[1])
+            else:
+                block_size = tuple([1] * (_t.ndim - 1) + [_t.shape[-1]])
+            scale, zp = choose_qparams_affine(
+                _t, MappingType.SYMMETRIC, block_size, _torch.int8, eps=1e-6
+            )
+            q = quantize_affine(_t, block_size, scale, zp, _torch.int8)
+            if q.ndim == 2 and scale.ndim == 1:
+                scale = scale.view(-1, 1)
+            return q.to(_torch.int8), scale.to(_torch.float32)
+        except Exception as e:
+            return _fallback_custom(t, bits, group_size, name, f"{type(e).__name__}: {e}")
     if name == "quanto":
+        if bits != 8:
+            return _fallback_custom(t, bits, group_size, name, "only 8-bit is engine-compatible")
         try:
             import torch as _torch
-            from optimum.quanto import qint8, qint4, absmax_scale, quantize_weight
+            from optimum.quanto import qint8, absmax_scale, quantize_weight
 
             _t = t.detach().float()
-            if bits == 8:
-                scale = absmax_scale(_t, qint8, axis=0)
-                q_tensor = quantize_weight(_t, qint8, axis=0, scale=scale)
-                q_data = q_tensor._data if hasattr(q_tensor, "_data") else q_tensor._qdata
-                return q_data.to(_torch.int8), scale.to(_torch.float32)
-            if bits == 4:
-                scale = absmax_scale(_t, qint4, axis=0)
-                q_tensor = quantize_weight(_t, qint4, axis=0, scale=scale)
-                q_data = q_tensor._data if hasattr(q_tensor, "_data") else q_tensor._qdata
-                return q_data.to(_torch.int8), scale.to(_torch.float32)
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
-        except Exception:
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
+            scale = absmax_scale(_t, qint8, axis=0)
+            q_tensor = quantize_weight(_t, qint8, axis=0, scale=scale)
+            q_data = q_tensor._data if hasattr(q_tensor, "_data") else q_tensor._qdata
+            return q_data.to(_torch.int8), scale.to(_torch.float32)
+        except Exception as e:
+            return _fallback_custom(t, bits, group_size, name, f"{type(e).__name__}: {e}")
     if name == "bitsandbytes":
+        if bits != 8:
+            return _fallback_custom(
+                t, bits, group_size, name,
+                "NF4 blockwise format is incompatible with the engine dequantizer",
+            )
         try:
             import torch as _torch
             import bitsandbytes as bnb
 
             _t = t.detach().float()
-            if bits == 8:
-                result = bnb.functional.int8_vectorwise_quant(_t)
-                if isinstance(result, (tuple, list)):
-                    q = result[0]
-                    scale = result[1] if len(result) > 1 else None
-                    if scale is None:
-                        from ._quant import quantize_tensor as _custom_q
-
-                        return _custom_q(t, bits, group_size=group_size)
-                    if scale.ndim == 1:
-                        scale = scale.view(-1, 1)
-                    scale = (scale.float() / 127.0).to(_torch.float32)
-                    return q.to(_torch.int8), scale
-                return result.to(_torch.int8), _torch.ones((result.shape[0], 1), dtype=_torch.float32)
-            if bits == 4:
-                q4, state = bnb.functional.quantize_4bit(_t, blocksize=group_size or 64, quant_type="nf4")
-                scale = state.absmax if hasattr(state, "absmax") else _torch.ones((1,), dtype=_torch.float32)
-                return q4, scale.to(_torch.float32)
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
-        except Exception:
-            from ._quant import quantize_tensor as _custom_q
-
-            return _custom_q(t, bits, group_size=group_size)
+            result = bnb.functional.int8_vectorwise_quant(_t)
+            if isinstance(result, (tuple, list)):
+                q = result[0]
+                scale = result[1] if len(result) > 1 else None
+                if scale is None:
+                    return _fallback_custom(t, bits, group_size, name, "no scale returned")
+                if scale.ndim == 1:
+                    scale = scale.view(-1, 1)
+                scale = (scale.float() / 127.0).to(_torch.float32)
+                return q.to(_torch.int8), scale
+            return result.to(_torch.int8), _torch.ones(
+                (result.shape[0], 1), dtype=_torch.float32
+            )
+        except Exception as e:
+            return _fallback_custom(t, bits, group_size, name, f"{type(e).__name__}: {e}")
     from ._quant import quantize_tensor as _custom_q
 
     return _custom_q(t, bits, group_size=group_size)
@@ -155,6 +158,8 @@ def quantize_tensor_with_backend(
 def dequantize_with_backend(
     q: torch.Tensor, scale: torch.Tensor, bits: int = 8, backend: str | None = "auto"
 ) -> torch.Tensor:
+    # All backends emit the custom wire format (enforced in quantize_tensor_with_backend),
+    # so dequantization is always the custom path.
     from ._quant import dequantize as _custom_dq
 
     return _custom_dq(q, scale, bits=bits)

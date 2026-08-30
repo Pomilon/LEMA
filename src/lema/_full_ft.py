@@ -204,6 +204,17 @@ class FullFTManager:
             for key in keys:
                 _, name = key
                 w = self.adapter.load_tensor(self.gbi, name)
+                if w.dtype in (torch.int8, torch.uint8):
+                    # Pre-quantized checkpoint: the disk tensor holds quantized
+                    # codes. Cast them to float as-is would train on garbage —
+                    # recover the real weights with the sibling scale.
+                    s_key = f"{name}.scale"
+                    s = self.gbi.load_tensors([s_key])[s_key]
+                    w = dequantize_with_backend(w, s, bits=self.config.weights_bits or 8,
+                                                backend="custom")
+                    shape = self.gbi.get_tensor_shape(name)
+                    if shape is not None:
+                        w = w.reshape(torch.Size(shape))
                 w = w.to(dtype).contiguous()
                 self.true_weights[key] = w
                 self.original[key] = w.clone()
