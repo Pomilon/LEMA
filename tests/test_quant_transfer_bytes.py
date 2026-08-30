@@ -7,7 +7,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from lema import LemaModel, LemaConfig, MemoryStrategy
+from lema import LemaModel, LemaConfig, MemoryStrategy, _w8a8
 from lema._quant_backend import quantize_tensor_with_backend
 
 
@@ -52,7 +52,8 @@ def test_quant_ram_staging_holds_raw_int8_bytes(tmp_path):
     assert tr.ram_buffers[1000].dtype == torch.uint8, \
         f"RAM staging should hold raw bytes, got {tr.ram_buffers[1000].dtype}"
     assert tr.ram_buffers[1000].element_size() == 1
-    assert tr.vram_flat_buffers[0].dtype == torch.int8  # native W8A8 VRAM
+    if _w8a8.HAS_NATIVE:
+        assert tr.vram_flat_buffers[0].dtype == torch.int8  # native W8A8 VRAM
     assert tr.itemsize == 1, "footprint accounting must use quantized itemsize"
 
 

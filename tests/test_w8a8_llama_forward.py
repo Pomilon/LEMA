@@ -76,6 +76,7 @@ def test_quantized_layer_forward_close_to_fp16(tmp_path):
     assert diff < 0.5, f"quantized vs fp16 layer forward max diff {diff}"
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_quantized_layer_scale_w_matches_pack(tmp_path):
     q = _build_llama(tmp_path, weights_bits=8)
     tr = q.store.transfer
@@ -139,7 +140,8 @@ def test_lora_training_with_w8a8_uses_dequant_path_and_creates_lora(tmp_path):
     tr.async_transfer_to_vram(1, vram_slot=0, ram_slot=0)
     flat_fp32 = tr.get_vram_flat_buffer(0, allow_quantized=False)
     assert flat_fp32.dtype.is_floating_point
-    assert tr.get_vram_flat_buffer(0).dtype == torch.int8
+    if _w8a8.HAS_NATIVE:
+        assert tr.get_vram_flat_buffer(0).dtype == torch.int8
     block = model.adapter.construct_layer_module(1, flat_fp32, model.lora_manager, None)
     q_proj = block.self_attn.q_proj
     assert hasattr(q_proj, "lora_A") and hasattr(q_proj, "lora_B")

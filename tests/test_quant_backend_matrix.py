@@ -14,13 +14,7 @@ def _fresh_warnings(monkeypatch):
     monkeypatch.setattr(_qb, "_WARNED", set())
 
 _ALL = ("custom", "torchao", "quanto", "bitsandbytes")
-_HAS = {
-    "custom": True,
-    "torchao": pytest.importorskip("torchao", reason="torchao not installed") is not None,
-    "quanto": pytest.importorskip("optimum.quanto", reason="quanto not installed") is not None,
-    "bitsandbytes": pytest.importorskip("bitsandbytes", reason="bitsandbytes not installed")
-    is not None,
-}
+_HAS = {b: _qb.is_backend_available(b) for b in _ALL}
 
 
 def _matrix() -> torch.Tensor:
@@ -32,6 +26,7 @@ def test_all_backend_bits_combos_roundtrip():
     t = _matrix()
     for backend in _ALL:
         if not _HAS[backend]:
+            print(f"skipping {backend}: not available")
             continue
         for bits in (8, 4):
             q, scale = quantize_tensor_with_backend(t, bits, backend=backend)
@@ -58,16 +53,14 @@ def test_incompatible_backend_bits4_warns_and_falls_back(backend, caplog):
 
 
 def test_unexpected_exception_fallback_warns(caplog, monkeypatch):
-    pytest.importorskip("torchao")
+    if not _HAS["torchao"]:
+        pytest.skip("torchao not available")
 
     def boom(*a, **k):
         raise RuntimeError("simulated torchao failure")
 
     monkeypatch.setattr(_qb, "_WARNED", set())
     import torchao.quantization.utils as tu
-
-    def boom(*a, **k):
-        raise RuntimeError("simulated torchao failure")
 
     monkeypatch.setattr(tu, "choose_qparams_affine", boom)
     t = _matrix()

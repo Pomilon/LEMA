@@ -1,11 +1,12 @@
 import math
 import os
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from lema import LemaConfig, LemaModel, MemoryStrategy
+from lema import LemaConfig, LemaModel, MemoryStrategy, _w8a8
 from lema._config import TrainingMode
 
 
@@ -37,6 +38,7 @@ def _int8_flat(model, layer_id):
     return tr.get_vram_flat_buffer(0)
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_full_ft_apply_to_quantized_linear(tmp_path):
     model = _build(tmp_path, weights_bits=8)
     mgr = model.full_ft_manager
@@ -61,6 +63,7 @@ def test_full_ft_apply_to_quantized_linear(tmp_path):
     assert torch.allclose(mod.scale_w, s_ref.view(-1), atol=1e-6)
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_full_ft_step_updates_quantized_copy(tmp_path):
     model = _build(tmp_path, weights_bits=8)
     mgr = model.full_ft_manager
@@ -79,6 +82,7 @@ def test_full_ft_step_updates_quantized_copy(tmp_path):
     assert rel.item() < 1e-1
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_lora_with_int8_flat_raises(tmp_path):
     model = _build(tmp_path, training_mode=TrainingMode.LORA, weights_bits=8)
     model.initialize_lora()

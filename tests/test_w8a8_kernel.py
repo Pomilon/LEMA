@@ -4,6 +4,7 @@ import pytest
 from lema import _w8a8
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_native_int8_gemm_matches_fp32_reference():
     torch.manual_seed(0)
     M, K, N = 64, 128, 64
@@ -15,6 +16,7 @@ def test_native_int8_gemm_matches_fp32_reference():
     assert torch.equal(out, ref)
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_native_int8_gemm_medium_shape():
     torch.manual_seed(1)
     M, K, N = 2048, 4096, 4096

@@ -3,7 +3,7 @@ import torch
 import pytest
 from transformers import MistralConfig, MixtralConfig, MistralForCausalLM, MixtralForCausalLM
 from safetensors.torch import save_file
-from lema import LemaModel, LemaConfig, MemoryStrategy
+from lema import LemaModel, LemaConfig, MemoryStrategy, _w8a8
 
 
 def _build_mistral(tmp_path, **kw):
@@ -136,6 +136,7 @@ def test_lfm2_moe_quantized_layer_forward_close_to_fp16(tmp_path):
     assert diff < 0.5
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_w8a8_flat_buffer_is_int8_for_all_adapters(tmp_path):
     for builder in (_build_mistral, _build_mixtral, _build_lfm2):
         m = builder(tmp_path, weights_bits=8)

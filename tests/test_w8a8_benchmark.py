@@ -1,5 +1,6 @@
 # tests/test_w8a8_benchmark.py
 import time
+import pytest
 import torch
 from lema import _w8a8
 

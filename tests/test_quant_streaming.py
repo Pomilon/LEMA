@@ -4,7 +4,7 @@ import torch
 import pytest
 from transformers import LlamaConfig, LlamaForCausalLM
 from safetensors.torch import save_file
-from lema import LemaModel, LemaConfig, MemoryStrategy
+from lema import LemaModel, LemaConfig, MemoryStrategy, _w8a8
 from lema._config import TrainingMode
 from lema._tensorstore import KVChunkStore, chunked_attention
 
@@ -52,6 +52,7 @@ def _build_llama(tmp_path, **cfg_kwargs):
     return LemaModel(lc)
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_quantized_weight_stream_loads_and_matches(tmp_path):
     model = _build_llama(tmp_path, weights_bits=8)
     tr = model.store.transfer
@@ -123,6 +124,7 @@ def test_int4_forward_close_to_fp16(tmp_path):
     assert diff < 0.3, f"int4 vs fp16 forward max diff {diff}"
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_ram_slot_repack_does_not_corrupt_vram_dequant(tmp_path):
     model = _build_llama(tmp_path, weights_bits=8)
     tr = model.store.transfer
@@ -140,6 +142,7 @@ def test_ram_slot_repack_does_not_corrupt_vram_dequant(tmp_path):
     assert rel.item() < 1e-2, f"dequant corrupted by slot repack: rel error {rel.item()}"
 
 
+@pytest.mark.skipif(not _w8a8.HAS_NATIVE, reason="native W8A8 ext not built")
 def test_cross_slot_vram_transfer_dequant_matches(tmp_path):
     model = _build_llama(tmp_path, weights_bits=8)
     tr = model.store.transfer
