@@ -166,7 +166,7 @@ Findings (honest trade-offs, now reflected in README/USER_GUIDE):
 
 - **Storage savings are in RAM/disk/PCIe, not VRAM**: quantized weight streams cut RAM/disk footprint ~2x (int8) / 4x (int4-weights), but the weight path keeps a fp32 dequant slot per VRAM slot, so peak VRAM rises (0.76 → 1.43 GB here). Full-FT optimizer states / accumulators / KV chunks quantize their on-RAM and on-disk representations.
 - **int8 weights are lossy at load**: first-loss gap vs baseline ~0.31 (real weights), so per-step training dynamics differ slightly.
-- **Quantize/dequant adds real per-step cost** (~10x on TinyLlama, CPU-side quantize at pack dominates and scales with model size). Measure before enabling on latency-sensitive workloads; int8-weights-only is the cheapest option.
+- **On-the-fly quantize adds real per-step cost**: CPU-side per-row quantize at pack time dominates on CPU-starved hosts (see the W8A8 section below — use pre-quantized checkpoints for streaming full-FT). int8-weights-only is the cheapest option.
 
 Full unit suite 137/137 passing (local + Kaggle), including the all-four-bits end-to-end train smoke test.
 
@@ -176,34 +176,51 @@ Full unit suite 137/137 passing (local + Kaggle), including the all-four-bits en
 
 CPU kernel benchmark (2048×4096×4096, 6-core/12-thread box, bit-exact vs fp32 reference): native AVX2 int8 GEMM 0.304 s vs torch fp32 matmul 0.367 s (0.83x — faster than fp32). Gated by `tests/test_w8a8_benchmark.py`.
 
-T4 end-to-end (TinyLlama 1.1B, selective full-FT last:2 q/k/v/o, 2 steps, Kaggle T4 — `HAS_NATIVE True`, `USE_CUDA True`, kernel v11 COMPLETE):
+T4 end-to-end (TinyLlama 1.1B, selective full-FT last:2 q/k/v/o, 2 steps, Kaggle T4 — `HAS_NATIVE True`, `USE_CUDA True`):
 
-**Transfer (RAM→VRAM, one layer = 22.0M params, 88.1 MB fp16):**
+**Transfer (RAM→VRAM, one layer = 22.0M params, 88.1 MB fp16, measured after the exact-byte transfer fix):**
 
 | Precision | Buffer | Time | Throughput |
 |---|---|---|---|
-| fp16 | 88.1 MB | 12.30 ms | 7.2 GB/s |
-| int8 (W8A8) | 44.0 MB | 14.06 ms | 3.1 GB/s |
+| fp16 | 88.1 MB | 8.57 ms | 10.3 GB/s |
+| int8 (W8A8, on-fly) | 44.0 MB | 4.63 ms | 9.5 GB/s |
+| int8 (pre-quantized) | 44.0 MB | 4.57 ms | 9.6 GB/s |
 
-Transfer bytes halve (2.0× reduction, 88.1→44.0 MB) — storage/PCIe saving is real. RAM→VRAM wall time does not improve (Python quantize + fused scale overhead > PCIe saving on this shape).
+Transfer bytes halve (2.0× reduction, 88.1→44.0 MB) and wall time halves with them: both paths now move only the exact payload and sit at PCIe 3.0 x16 wire saturation (~10 GB/s pinned). Pre-fix, every transfer moved the full fp16-sized staging buffer (131 MB) with a dtype-cast penalty, which printed as a misleading 3.1 GB/s "throughput".
 
-**Training step (TinyLlama 1.1B, selective full-FT last:2, seq=64, same selection):**
+**Training step (TinyLlama 1.1B, selective full-FT last:2, seq=64, Kaggle T4):**
 
-| Metric | fp16 baseline | int8-all (dequant slot) | int8-W8A8 (native int8×int8) |
-|---|---|---|---|
-| Loss | 13.44 → 12.25 | 13.00 → 12.13 | 12.81 → 11.81 → 12.69 → 11.69* |
-| Step 1 / Step 2 | 2497 ms / 945 ms | 18562 ms / 16048 ms | 2346 ms / 862 ms → 18041 ms / 15481 ms |
-| Speedup (step2) | — | 0.06× | 0.06× |
-| Peak VRAM | 0.76 GB | 1.23 GB | 1.23 GB |
-| Peak RSS | 4.89 GB | 5.30 GB | 5.11 GB (vs 5.23 GB fp16 baseline) |
+| Metric | fp16 baseline | int8-W8A8 on-fly | int8-W8A8 pre-quantized | int4-W4A16 pre-quantized |
+|---|---|---|---|---|
+| Loss (2 steps) | 12.94 → 11.88 | ~15–16 s/step, 0.06× | 13.44 → 12.38 (Δ1.06) | 13.00 → 11.56 |
+| Sustained step | ~0.8–1.3 s | ~15 s (pack_wait 87–88%) | 0.79–1.26 s (pack_wait 0.4%) | 1.17–1.61 s (pack_wait <1%) |
+| Peak VRAM | 0.76 GB | 1.23 GB | −520 MB vs fp16 | −552 MB vs fp16 |
 
-*W8A8 baseline is fresh run with same seed (12.81→11.81), W8A8 step is 12.69→11.69; both baselines show same ~0.76 GB VRAM.
+**Honest findings (corrected after step-time profiling and pre-quant verification):**
 
-**Honest findings:**
+- **On-the-fly quantization is CPU-bound at pack time:** on 2-vCPU hosts ~83–88% of the W8A8 step is `pack_wait` — CPU per-row quantize of ~131 MB/layer stalling the prefetch pipeline. This made on-fly W8A8 15–20× slower than fp16. The int8 GEMM itself is a minor cost (~196 ms/step on sm_75).
+- **Pre-quantized checkpoints eliminate the bottleneck:** packing becomes a raw byte copy (`pack_wait` 12.4 s → 4 ms). int8 pre-quantized full-FT runs at fp16 parity on sustained steps (~1.26 s vs ~1.27 s fp16 wall, 3-step breakdown) with −520 MB VRAM, and learns at the fp16 rate (Δloss 1.06 vs 1.06 over two steps). int4 pre-quantized runs ~0.7× with −552 MB.
+- **Storage/PCIe win is real and now reaches the wire:** weight bytes halve across disk, RAM, PCIe, and VRAM (2.0×), and transfer wall time halves with them (9.5–10.3 GB/s ≈ wire saturation). The training-correctness bug where phase-2 native modules re-quantized updated weights (making int8 full-FT ~15× slower to learn) is fixed; all full-FT phases use dequantized modules.
+- **Remaining per-step cost is construct/materialization** (~530–550 ms, 34–42% of wall in both phases), not quantization — fp16 streaming pays a similar structural cost. Optimization targets (phase-2 skip, same-layer re-transfer elision, fused dequant) are tracked separately.
+- **Correctness is sound:** loss advances every step, transfer byte reduction asserted, W8A8 forward bit-exact vs fp32 reference in unit tests (192 passed + 1 skipped full suite).
 
-- **Storage/PCIe win is real:** W8A8 halves weight bytes across disk, RAM, PCIe, and VRAM buffer simultaneously (44.0 vs 88.1 MB, 2.0×). C++ pack is 45% faster (1.15→0.63 ms) and end-to-end train step is 4.4% faster *in the pure C++ vs Python benchmark* — but not in the quantized training loop.
-- **Step time is dominated by quantized compute, not transfer:** per-step GEMM quantize/apply_scale + adapter reconstruction dominates (int8 GEMM is fast in isolation — 0.304 vs 0.367 s — but the per-layer quantized forward rebuilds + scales per step outweigh the saving on TinyLlama). Measured W8A8 step2 is ~18× slower than fp16 (862→15481 ms) on the T4 with `HAS_NATIVE True`.
-- **VRAM does not drop yet:** weight VRAM buffer halves (44 vs 88 MB) but quantized forward adds scale bookkeeping, and the full-FT path also holds dequant/full-precision structures; net peak VRAM rises 0.76→1.23 GB (+473 MB) on this selection. RSS is roughly flat.
-- **Correctness is sound:** loss advances every step, transfer byte reduction asserted, W8A8 forward bit-exact vs fp32 reference in unit tests (6 tests in `tests/test_w8a8_other_adapters.py`, 162 passed + 1 skipped full suite local and Kaggle).
+## Quantization Backends (parity and fallback behavior)
 
-Follow-up perf work (stream-overlapped dequant, fused pack+quant, kernel autotuning) is required for W8A8 to be faster wall-clock on real models — tracked separately. The current gate is correctness + honest measurement, not speedup.
+All four registered backends (`custom`, `torchao`, `quanto`, `bitsandbytes`) were exercised in the Kaggle benchmark (quanto/bnb installed in the notebook's setup cell) and in the local CPU suite. `quant_backend` only affects on-the-fly streamed-weight quantization; every backend must emit the engine's wire format (int8 codes + per-row fp32 scale for bits=8, packed uint4 nibbles + per-row scale for bits=4), and the engine's dequantizer is shared.
+
+**Weight-quant parity (TinyLlama `q_proj` 2048×2048, GPU, pack/transfer/accuracy bench):**
+
+| Backend | bits=8 rel-err | bits=8 wire | bits=4 rel-err | bits=4 wire | Notes |
+|---|---|---|---|---|---|
+| custom (reference) | 0.0039 | 4.20 MB | 0.0714 | 2.11 MB | per-row symmetric RTN |
+| torchao | 0.0039 (bit-identical to custom) | 4.20 MB | → custom | 2.11 MB | bits=4 is an explicit, warned fallback |
+| quanto | → custom on CUDA | 4.20 MB | → custom | 2.11 MB | native path verified on CPU; CUDA path warns ("1D Tensors cannot be quantized per-axis") and falls back |
+| bitsandbytes | → custom on CUDA | 4.20 MB | → custom | 2.11 MB | native path verified on CPU (`int8_vectorwise_quant`); CUDA path warns (IndexError) and falls back |
+
+Key facts:
+
+- **bits=8 on CPU is a real per-backend path** for torchao/quanto/bitsandbytes — verified by instrumented unit tests that spy on the backend's own quantize calls (31 native calls per full train step for both quanto and bitsandbytes), not silent fallbacks.
+- **bits=4 is custom-only by construction**: quanto/bnb int4 formats (quanto qint4, bnb NF4 with blockwise absmax) are incompatible with the engine's shared dequantizer (NF4 is LUT-index codes + blockwise scales, not int4 two's-complement + per-row scale). Attempting them warns once and falls back to the custom quantizer — previously bnb bits=4 silently produced garbage, now impossible.
+- **On CUDA, quanto/bnb bits=8 also fall back to custom** with a logged warning (quanto's per-axis API rejects the engine's per-row layout; bnb's vectorwise API raises on the engine's tensor shapes). The fallback emits byte-identical wire format, so accuracy and transfer behavior are exactly custom's.
+- **Training sweep (bits=8, on-fly, Kaggle T4):** all four backends train, but every backend inherits the same CPU pack_wait bottleneck (~15–16 s/step, 0.06× fp16) because the effective quantizer is custom on GPU for quanto/bnb — pre-quantized checkpoints are the fix regardless of backend.
+- `auto` backend resolution prefers torchao → quanto → bitsandbytes → custom; explicit invalid combos never crash, they warn (deduplicated) and fall back.

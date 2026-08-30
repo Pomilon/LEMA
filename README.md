@@ -169,14 +169,37 @@ config = LemaConfig(
 | `custom` | built-in | CPU + CUDA | hand-rolled W8A8 (AVX2 / DP4A) — default fallback |
 | `torchao` | `pip install lema[torchao]` | CPU + CUDA + MPS + XPU | PyTorch-native, recommended |
 | `quanto` | `pip install lema[quanto]` | CPU + CUDA + MPS | `optimum-quanto`, lightweight |
-| `bitsandbytes` | `pip install lema[bitsandbytes]` | CUDA only | `LLM.int8` / NF4 |
+| `bitsandbytes` | `pip install lema[bitsandbytes]` | CUDA only | `LLM.int8` (bits=8); NF4 is not engine-compatible |
 | `auto` | `pip install lema[quant]` → torchao+quanto | auto-detect | picks first available (`torchao` > `quanto` > `bitsandbytes` > `custom`) |
 
 `pip install lema[all-quant]` pulls all three; `pip install lema` alone keeps the `custom` fallback with no extra deps.
 
+`quant_backend` applies to **on-the-fly streamed weight quantization** only (per-row int8 for bits=8 — GPU parity: custom ≡ torchao, rel-err 0.0039). Optimizer states, gradient accumulators, KV cache, and pre-quantized checkpoints always use the built-in `custom` format. All backends emit the engine's int8 + per-row-scale wire format. A backend that cannot serve the requested bit width (e.g. `quanto`/`bitsandbytes` at bits=4) logs a warning and falls back to `custom`; unexpected backend errors also warn instead of failing silently.
+
 With native W8A8 kernels present (built automatically: AVX2 on CPU, DP4A on CUDA), `weights_bits=8` goes further than storage savings — llama decoder layers are served as **raw int8 buffers and consumed directly by int8×int8→int32 GEMM kernels** with fused scale epilogues. No fp32 dequant slot is produced on the hot path, so the streamed weight footprint halves on disk, RAM, PCIe, *and* VRAM simultaneously. Full-FT optimizer states and accumulators stay quantized in RAM (including the mmap disk backend) and are dequantized only inside the per-layer AdamW step. The KV cache stores int8 values with a dynamic per-chunk scale.
 
 **Trade-offs:** on tiny models int8 training output stays within ~1% of fp16 (quantized weight relative error < 1e-2 — see `tests/test_quant_streaming.py`, `tests/test_w8a8_llama_forward.py`); on real models the quantized-weight error shifts the loss by a fraction of a nat at load. Without the native kernels (or for int4, full-FT-selected layers during training, embedding/head layers, and generation-mode KV paths) weights fall back to dequantize-at-consumption: disk/RAM still shrink but compute runs at full precision. LoRA adapters are not yet supported on int8 buffers — such constructions fail loudly rather than silently dropping adapters.
+
+### Pre-quantized checkpoints (recommended for streaming full-FT)
+
+On-the-fly weight quantization runs on the CPU at pack time. On CPU-starved hosts (e.g. 2-vCPU Kaggle) it dominates streaming full-FT training: ~83–85% of step time is spent waiting for the quantizer (`pack_wait`), making W8A8 **15–16× slower than fp16** (15.0 s/step vs 1.3 s/step fp16 on TinyLlama-1.1B / T4).
+
+Pre-quantize the checkpoint offline instead, so packing becomes a raw byte copy with zero CPU quantize:
+
+```bash
+python tools/quantize_checkpoint.py <model_dir> --bits 8 --output_dir <out_dir>   # or --bits 4
+```
+
+Each bit width gets its own checkpoint (int4 stores packed uint8 + logical shapes in safetensors metadata). The engine detects int8/uint8 + `.scale` siblings per tensor, stages raw bytes into RAM (uint8 staging, exact transfer bytes), and dequantizes at consumption. Measured on T4 / TinyLlama-1.1B:
+
+| Mode | step time | vs fp16 | pack_wait |
+|---|---|---|---|
+| fp16 | ~0.8–1.3 s | 1.0× | ~15% |
+| int8 W8A8 on-the-fly | ~15 s | 0.06× | ~88% |
+| int8 W8A8 pre-quantized | ~0.8–1.3 s | ≈1.0× | <1% |
+| int4 W4A16 pre-quantized | ~1.2–1.6 s | ~0.7× | <1% |
+
+Pre-quantized int8 full-FT learns at the same rate as fp16 (Δloss 1.06 vs 1.06 over two steps) while saving ~520 MB VRAM. All quantization levels transfer exact payload bytes over PCIe (2×/4× reduction, verified 9.6 GB/s ≈ wire saturation).
 
 ## Documentation
 
