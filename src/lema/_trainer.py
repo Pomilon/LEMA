@@ -96,8 +96,14 @@ class LemaTrainer:
                 slot = i % 2
                 next_slot = (i + 1) % 2
 
+                # Native W8A8 phase-2 re-quantizes updated true_weights into int8
+                # codes (set_int8_weight), so the loss (computed at the head over
+                # these boundary activations) only responds to code flips and
+                # full-FT updates barely move it. Use dequant modules for full-FT.
                 flat_vram = self.memory.get_vram_flat_buffer(
-                    slot, allow_quantized=(self.lora_manager is None and self.memory._use_native_w8a8()))
+                    slot, allow_quantized=(self.lora_manager is None
+                                           and self.full_ft_manager is None
+                                           and self.memory._use_native_w8a8()))
 
                 if i + 1 < len(self.layers):
                     self.memory.wait_prefetch(next_slot)

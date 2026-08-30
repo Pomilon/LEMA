@@ -311,3 +311,49 @@ def test_prequant_bf16_fullft_train_step_no_dtype_crash(tmp_path):
     assert all(l == l and l < 1e3 for l in losses), f"losses diverged: {losses}"
     # second step must differ: guards against updates never landing in the forward
     assert losses[1] != losses[0], f"training did not advance: {losses}"
+
+
+def test_prequant_fullft_phase2_uses_dequant_modules(tmp_path, monkeypatch):
+    """v27 root cause: with full-FT + native W8A8 (bits=8), phase-2 must NOT build
+    native quantized modules — set_int8_weight re-quantizes updated true_weights
+    into int8 codes, so the head loss (computed over phase-2 boundary activations)
+    barely responds to +-lr updates and full-FT learns ~15x slower."""
+    import lema._w8a8 as _w8a8
+    monkeypatch.setattr(_w8a8, "HAS_NATIVE", True)
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=100, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                      max_position_embeddings=128, attn_implementation="eager")
+    hf = LlamaForCausalLM(cfg).to(torch.bfloat16)
+    sd = {k: v.clone().detach() for k, v in hf.state_dict().items()}
+    model_dir = tmp_path / "model_dir"
+    os.makedirs(model_dir, exist_ok=True)
+    save_file(sd, str(model_dir / "model.safetensors"))
+    cfg.save_pretrained(str(model_dir))
+    preq_dir = _save_prequant(model_dir, "preq", 8)
+
+    lc = LemaConfig(model_name_or_path=str(preq_dir), model_type="llama",
+                    gbi_path=str(preq_dir / "model.safetensors"), device="cpu",
+                    strategy=MemoryStrategy.STREAMING, max_vram_gb=4.0, weights_bits=8,
+                    training_mode="selective_full", trainable_layers=["1"])
+    model = LemaModel(lc)
+
+    calls = []
+    orig = model.store.transfer.get_vram_flat_buffer
+
+    def spy(slot, allow_quantized=True):
+        calls.append(allow_quantized)
+        return orig(slot, allow_quantized=allow_quantized)
+
+    model.store.transfer.get_vram_flat_buffer = spy
+    tr = model.get_trainer()
+    losses = []
+    for _ in range(2):
+        ids = torch.randint(0, 100, (1, 16))
+        _, loss = tr.train_step(ids, labels=ids.clone())
+        losses.append(float(loss))
+
+    assert calls, "get_vram_flat_buffer was never called"
+    assert not any(calls), \
+        f"phase-2 used native quantized buffers during full-FT (allow_quantized={calls})"
+    assert losses[1] != losses[0], f"training did not advance: {losses}"
